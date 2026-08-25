@@ -1,27 +1,17 @@
 #pragma once
 
+#include <array>
 #include <vector>
-
-#ifdef DYNARMIC_MASTER
-#include <dynarmic/interface/A32/a32.h>
-#include <dynarmic/interface/A32/config.h>
-
-#include <dynarmic/interface/exclusive_monitor.h>
-#else
-#include <dynarmic/A32/a32.h>
-#include <dynarmic/A32/config.h>
-
-#include <dynarmic/exclusive_monitor.h>
-#endif
 
 #include "khash.h"
 #include "filesystem.h"
 #include "32bit.h"
+#include "arm_interpreter.h"
 
 // TSB (thread local variables)
 #define ARM_REG_C13_C0_3 113
-#define ARM_REG_SP Reg::SP
-#define ARM_REG_PC Reg::PC
+#define ARM_REG_SP 13
+#define ARM_REG_PC 15
 
 #define PAGE_TABLE_ADDRESS_SPACE_BITS 36
 #define DYN_PAGE_BITS 12 // 4k
@@ -49,45 +39,8 @@
 #define POST_CALLBACK_SYSCALL_NUMBER 0x8888
 #define DARWIN_SWI_SYSCALL 0x80
 
-#define LC32HaltReasonSVC Dynarmic::HaltReason::UserDefined1
-#define LC32HaltReasonRetFromGuest Dynarmic::HaltReason::UserDefined2
-
-class Reg {
-public:
-  enum RegEnum {
-    R0,
-    R1,
-    R2,
-    R3,
-    R4,
-    R5,
-    R6,
-    R7,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
-    SP = R13,
-    LR = R14,
-    PC = R15,
-    INVALID_REG = 99
-  };
-};
-
-class ExtReg {
-public:
-  enum ExtRegEnum {
-    // clang-format off
-    S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31,
-    D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D11, D12, D13, D14, D15, D16, D17, D18, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28, D29, D30, D31,
-    Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15
-    // clang-format on
-  };
-};
+#define LC32HaltReasonSVC 1
+#define LC32HaltReasonRetFromGuest 2
 
 struct guest_file_mapping {
     const char *name;
@@ -118,111 +71,100 @@ typedef struct context32 {
 
 #include "arm_dynarmic_cp15.h"
 
+// Compatibility class that wraps our interpreter
 class DynarmicCpsr {
 public:
-    DynarmicCpsr(Dynarmic::A32::Jit *cpu)
-        : cpu{cpu} {}
+    DynarmicCpsr(ArmInterpreter *interp)
+        : cpu{interp} {}
 
     bool hasBit(int offset) {
-        return ((cpu->Cpsr() >> offset) & 1) == 1;
+        return ((cpu->ctx.cpsr >> offset) & 1) == 1;
     }
 
     void setBit(int offset) {
         int mask = 1 << offset;
-        cpu->SetCpsr(cpu->Cpsr() | mask);
+        cpu->ctx.cpsr = cpu->ctx.cpsr | mask;
     }
 
     void clearBit(int offset) {
         int mask = ~(1 << offset);
-        cpu->SetCpsr(cpu->Cpsr() & mask);
+        cpu->ctx.cpsr = cpu->ctx.cpsr & mask;
     }
 
-    bool isA32() {
-        return hasBit(A32_BIT);
-    }
+    bool isA32() { return hasBit(A32_BIT); }
+    bool isThumb() { return hasBit(THUMB_BIT); }
+    bool isNegative() { return hasBit(NEGATIVE_BIT); }
+    void setNegative(bool on) { on ? setBit(NEGATIVE_BIT) : clearBit(NEGATIVE_BIT); }
+    bool isZero() { return hasBit(ZERO_BIT); }
+    void setZero(bool on) { on ? setBit(ZERO_BIT) : clearBit(ZERO_BIT); }
+    bool hasCarry() { return hasBit(CARRY_BIT); }
+    void setCarry(bool on) { on ? setBit(CARRY_BIT) : clearBit(CARRY_BIT); }
+    bool isOverflow() { return hasBit(OVERFLOW_BIT); }
+    void setOverflow(bool on) { on ? setBit(OVERFLOW_BIT) : clearBit(OVERFLOW_BIT); }
+    int getMode() { return cpu->ctx.cpsr & MODE_MASK; }
+    int getEL() { return (cpu->ctx.cpsr >> 2) & 3; }
 
-    bool isThumb() {
-        return hasBit(THUMB_BIT);
-    }
-
-    bool isNegative() {
-        return hasBit(NEGATIVE_BIT);
-    }
-
-    void setNegative(bool on) {
-        if (on) {
-            setBit(NEGATIVE_BIT);
-        } else {
-            clearBit(NEGATIVE_BIT);
-        }
-    }
-
-    bool isZero() {
-        return hasBit(ZERO_BIT);
-    }
-
-    void setZero(bool on) {
-        if (on) {
-            setBit(ZERO_BIT);
-        } else {
-            clearBit(ZERO_BIT);
-        }
-    }
-
-    bool hasCarry() {
-        return hasBit(CARRY_BIT);
-    }
-
-    void setCarry(bool on) {
-        if (on) {
-            setBit(CARRY_BIT);
-        } else {
-            clearBit(CARRY_BIT);
-        }
-    }
-
-    bool isOverflow() {
-        return hasBit(OVERFLOW_BIT);
-    }
-
-    void setOverflow(bool on) {
-        if (on) {
-            setBit(OVERFLOW_BIT);
-        } else {
-            clearBit(OVERFLOW_BIT);
-        }
-    }
-
-    int getMode() {
-        return cpu->Cpsr() & MODE_MASK;
-    }
-
-    int getEL() {
-        return (cpu->Cpsr() >> 2) & 3;
-    }
-
-    Dynarmic::A32::Jit *cpu;
+    ArmInterpreter *cpu;
 };
 
 __BEGIN_DECLS
+
+// Forward declarations
+char *get_memory_page(u64 vaddr);
+void *get_memory(u64 vaddr);
+
+static inline u8 mem_read8(u32 vaddr) {
+    u8 *dest = (u8 *)get_memory(vaddr);
+    return dest ? *dest : 0;
+}
+static inline u16 mem_read16(u32 vaddr) {
+    if(vaddr & 1) return (u16)mem_read8(vaddr) | ((u16)mem_read8(vaddr+1) << 8);
+    u16 *dest = (u16 *)get_memory(vaddr);
+    return dest ? *dest : 0;
+}
+static inline u32 mem_read32(u32 vaddr) {
+    if(vaddr & 3) return (u32)mem_read16(vaddr) | ((u32)mem_read16(vaddr+2) << 16);
+    u32 *dest = (u32 *)get_memory(vaddr);
+    return dest ? *dest : 0;
+}
+static inline u64 mem_read64(u32 vaddr) {
+    if(vaddr & 7) return (u64)mem_read32(vaddr) | ((u64)mem_read32(vaddr+4) << 32);
+    u64 *dest = (u64 *)get_memory(vaddr);
+    return dest ? *dest : 0;
+}
+static inline void mem_write8(u32 vaddr, u8 val) {
+    u8 *dest = (u8 *)get_memory(vaddr);
+    if(dest) *dest = val;
+}
+static inline void mem_write16(u32 vaddr, u16 val) {
+    if(vaddr & 1) { mem_write8(vaddr, val); mem_write8(vaddr+1, val>>8); return; }
+    u16 *dest = (u16 *)get_memory(vaddr);
+    if(dest) *dest = val;
+}
+static inline void mem_write32(u32 vaddr, u32 val) {
+    if(vaddr & 3) { mem_write16(vaddr, val); mem_write16(vaddr+2, val>>16); return; }
+    u32 *dest = (u32 *)get_memory(vaddr);
+    if(dest) *dest = val;
+}
+static inline void mem_write64(u32 vaddr, u64 val) {
+    if(vaddr & 7) { mem_write32(vaddr, val); mem_write32(vaddr+4, val>>32); return; }
+    u64 *dest = (u64 *)get_memory(vaddr);
+    if(dest) *dest = val;
+}
 
 class DynarmicCallbacks32;
 typedef struct {
   khash_t(memory) *memory;
   size_t num_page_table_entries;
   void **page_table;
-  union {
-    DynarmicCallbacks32 *cb;
-    Dynarmic::A32::UserCallbacks *ucb;
-  };
-  Dynarmic::ExclusiveMonitor *monitor;
+  DynarmicCallbacks32 *cb;
   LC32Filesystem *fs;
   u32 guest_dlsym, guest_LC32InvokeGuestC;
   dyld_all_image_infos_32 *dyld_info_section;
 } dynarmic;
 
 typedef struct {
-  Dynarmic::A32::Jit *jit;
+  ArmInterpreter *interp;
   DynarmicCpsr *cpsr;
 } dynarmic_thread;
 
@@ -262,17 +204,15 @@ u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_objec
 __END_DECLS
 
 #define U64_MASK (sizeof(u64)-1)
-// create a string in the guest stack pointer
 class DynarmicGuestStackString {
 public:
     ~DynarmicGuestStackString() {
-        threadHandle.jit->Regs()[Reg::SP] += totalLen;
+        threadHandle.interp->ctx.regs[13] += totalLen;
     }
 
     DynarmicGuestStackString(const char *hostPtr) {
-        // align to 8-byte
         totalLen = (strlen(hostPtr) + 1 + U64_MASK) &~ U64_MASK;
-        guestPtr = (threadHandle.jit->Regs()[Reg::SP] -= totalLen);
+        guestPtr = (threadHandle.interp->ctx.regs[13] -= totalLen);
         Dynarmic_mem_1write(guestPtr, totalLen, (char *)hostPtr);
     }
 
@@ -280,7 +220,6 @@ public:
     size_t totalLen;
 };
 
-// wrapper to access guest string depending on its boundary
 #define DynarmicHostString_NEED_FREE (1ull << 63)
 class DynarmicHostString {
 public:
@@ -293,12 +232,9 @@ public:
         }
     }
 
-    // Initialize the wrapper with a given guest string pointer
     DynarmicHostString(u32 guestPtr, u32 len = 0) : dirty{false}, guestPtr{guestPtr} {
          char *dest = (char *)get_memory(guestPtr);
-         if(!dest) {
-             abort();
-         }
+         if(!dest) { abort(); }
 
          totalLen = len ?: strlen(dest);
          u32 pageOff = guestPtr & DYN_PAGE_MASK;
@@ -306,9 +242,8 @@ public:
          if(!shouldFree) {
              hostPtr = dest;
          } else {
-             // If a length is not given, calculate until we hit null terminator
              if(!len) {
-                 totalLen = DYN_PAGE_SIZE - pageOff; // avoid page overflow
+                 totalLen = DYN_PAGE_SIZE - pageOff;
                  for(u64 vaddr = (guestPtr - pageOff) + DYN_PAGE_SIZE;; vaddr += DYN_PAGE_SIZE) {
                      char *page = get_memory_page(vaddr);
                      if(!page) abort();
@@ -323,10 +258,8 @@ public:
         }
     }
 
-    // Detach hostPtr from being automatically freed by the destructor
     const char *hostPtrForGuest() {
         if(shouldFree) {
-            // since we can't pass this object to guest, set a bit so we can detect it later
             hostPtr = (char *)((u64)hostPtr | DynarmicHostString_NEED_FREE);
         }
         shouldFree = false;

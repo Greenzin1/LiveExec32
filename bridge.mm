@@ -27,9 +27,9 @@ inline id LC32GetHostConstString(u32 guest_self) {
     // Construct a __NSCFConstantString { isa, flags, buffer, length }
     u64 *constStr = (u64 *)malloc(sizeof(u64[4]));
     constStr[0] = (u64)__CFConstantStringClassReference;
-    constStr[1] = (u64)sharedHandle.ucb->MemoryRead32(guest_self + sizeof(u32[1]));
-    u64 length = (u64)sharedHandle.ucb->MemoryRead32(guest_self + sizeof(u32[3]));
-    DynarmicHostString host_str(sharedHandle.ucb->MemoryRead32(guest_self + sizeof(u32[2])), length);
+    constStr[1] = (u64)mem_read32(guest_self + sizeof(u32[1]));
+    u64 length = (u64)mem_read32(guest_self + sizeof(u32[3]));
+    DynarmicHostString host_str(mem_read32(guest_self + sizeof(u32[2])), length);
     constStr[2] = (u64)host_str.hostPtrForGuest();
     constStr[3] = length;
     return (id)constStr;
@@ -65,22 +65,22 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     u32 structPtr = 0, structLen;
     if(host_cmd & SEL_RETURN_STRUCT) {
         host_cmd &= ~SEL_RETURN_STRUCT;
-        structPtr = sharedHandle.ucb->MemoryRead32(va_args);
-        structLen = sharedHandle.ucb->MemoryRead32(va_args += sizeof(u32));
+        structPtr = mem_read32(va_args);
+        structLen = mem_read32(va_args += sizeof(u32));
         va_args += sizeof(u32);
     }
 
     // FIXME: how to read number of args for variadic methods and translate its values?
     u64 args[9] = {
-        sharedHandle.ucb->MemoryRead64(va_args),
-        sharedHandle.ucb->MemoryRead64(va_args += sizeof(u64)),
-        sharedHandle.ucb->MemoryRead64(va_args += sizeof(u64)),
-        sharedHandle.ucb->MemoryRead64(va_args += sizeof(u64)),
-        sharedHandle.ucb->MemoryRead64(va_args += sizeof(u64)),
-        sharedHandle.ucb->MemoryRead64(va_args += sizeof(u64)),
-        sharedHandle.ucb->MemoryRead64(va_args += sizeof(u64)),
-        sharedHandle.ucb->MemoryRead64(va_args += sizeof(u64)),
-        sharedHandle.ucb->MemoryRead64(va_args += sizeof(u64))
+        mem_read64(va_args),
+        mem_read64(va_args += sizeof(u64)),
+        mem_read64(va_args += sizeof(u64)),
+        mem_read64(va_args += sizeof(u64)),
+        mem_read64(va_args += sizeof(u64)),
+        mem_read64(va_args += sizeof(u64)),
+        mem_read64(va_args += sizeof(u64)),
+        mem_read64(va_args += sizeof(u64)),
+        mem_read64(va_args += sizeof(u64))
     };
 
     typedef u64(*objc_msgSendFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
@@ -126,7 +126,7 @@ void LC32SetInvokeGuestFuncPtr(u32 dlsymFunc, u32 invokeFunc) {
 #pragma mark Host -> Guest functions
 
 u64 LC32InvokeGuestC(u32 pc, bool ret64, int argc, u32 *args) {
-    std::array<std::uint32_t, 16> &regs = threadHandle.jit->Regs();
+    u32 *regs = threadHandle.interp->ctx.regs;
     struct context32 ctx;
     Dynarmic_context_1save(&ctx);
 
@@ -137,7 +137,7 @@ u64 LC32InvokeGuestC(u32 pc, bool ret64, int argc, u32 *args) {
     }
     // subsequent arguments go to stack pointer
     for(int i = argc-1; i >= 4; i--) {
-        sharedHandle.ucb->MemoryWrite32(regs[Reg::SP] -= sizeof(u32), args[i]);
+        mem_write32(regs[13] -= sizeof(u32), args[i]);
     }
     regs[12] = pc;
     Dynarmic_emu_1start(sharedHandle.guest_LC32InvokeGuestC);
@@ -248,41 +248,41 @@ u32 guest_free(u32 guest_ptr) {
 
 // These class_copy*List shims are pretty much the same
 u32 guest_class_copyIvarList(u32 guest_cls, unsigned int *outCount) {
-    if(!threadHandle.jit) return false;
+    if(!threadHandle.interp) return false;
     static u32 guestPtr = 0;
     if(!guestPtr) guestPtr = guest_dlsym("class_copyIvarList");
-    u32 guest_outCount = threadHandle.jit->Regs()[Reg::SP] -= sizeof(u32);
+    u32 guest_outCount = threadHandle.interp->ctx.regs[13] -= sizeof(u32);
     u32 args[] = {guest_cls, guest_outCount};
     u32 result = LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
-    *outCount = sharedHandle.ucb->MemoryRead32(guest_outCount);
-    threadHandle.jit->Regs()[Reg::SP] += sizeof(u32);
+    *outCount = mem_read32(guest_outCount);
+    threadHandle.interp->ctx.regs[13] += sizeof(u32);
     return result;
 }
 u32 guest_class_copyMethodList(u32 guest_cls, unsigned int *outCount) {
-    if(!threadHandle.jit) return false;
+    if(!threadHandle.interp) return false;
     static u32 guestPtr = 0;
     if(!guestPtr) guestPtr = guest_dlsym("class_copyMethodList");
-    u32 guest_outCount = threadHandle.jit->Regs()[Reg::SP] -= sizeof(u32);
+    u32 guest_outCount = threadHandle.interp->ctx.regs[13] -= sizeof(u32);
     u32 args[] = {guest_cls, guest_outCount};
     u32 result = LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
-    *outCount = sharedHandle.ucb->MemoryRead32(guest_outCount);
-    threadHandle.jit->Regs()[Reg::SP] += sizeof(u32);
+    *outCount = mem_read32(guest_outCount);
+    threadHandle.interp->ctx.regs[13] += sizeof(u32);
     return result;
 }
 u32 guest_class_copyProtocolList(u32 guest_cls, unsigned int *outCount) {
-    if(!threadHandle.jit) return false;
+    if(!threadHandle.interp) return false;
     static u32 guestPtr = 0;
     if(!guestPtr) guestPtr = guest_dlsym("class_copyProtocolList");
-    u32 guest_outCount = threadHandle.jit->Regs()[Reg::SP] -= sizeof(u32);
+    u32 guest_outCount = threadHandle.interp->ctx.regs[13] -= sizeof(u32);
     u32 args[] = {guest_cls, guest_outCount};
     u32 result = LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
-    *outCount = sharedHandle.ucb->MemoryRead32(guest_outCount);
-    threadHandle.jit->Regs()[Reg::SP] += sizeof(u32);
+    *outCount = mem_read32(guest_outCount);
+    threadHandle.interp->ctx.regs[13] += sizeof(u32);
     return result;
 }
 
 u32 guest_class_createInstance(u32 guest_cls, u32 extraBytes) {
-    if(!threadHandle.jit) return false;
+    if(!threadHandle.interp) return false;
     static u32 guestPtr = 0;
     if(!guestPtr) guestPtr = guest_dlsym("class_createInstance");
     u32 args[] = {guest_cls, extraBytes};
@@ -290,7 +290,7 @@ u32 guest_class_createInstance(u32 guest_cls, u32 extraBytes) {
 }
 
 u32 guest_class_getClassMethod(u32 guest_cls, u32 guest_sel) {
-    if(!threadHandle.jit) return false;
+    if(!threadHandle.interp) return false;
     static u32 guestPtr = 0;
     if(!guestPtr) guestPtr = guest_dlsym("class_getClassMethod");
     u32 args[] = {guest_cls, guest_sel};
@@ -298,7 +298,7 @@ u32 guest_class_getClassMethod(u32 guest_cls, u32 guest_sel) {
 }
 
 u32 guest_class_getInstanceMethod(u32 guest_cls, u32 guest_sel) {
-    if(!threadHandle.jit) return false;
+    if(!threadHandle.interp) return false;
     static u32 guestPtr = 0;
     if(!guestPtr) guestPtr = guest_dlsym("class_getInstanceMethod");
     u32 args[] = {guest_cls, guest_sel};
@@ -306,7 +306,7 @@ u32 guest_class_getInstanceMethod(u32 guest_cls, u32 guest_sel) {
 }
 
 u32 guest_class_getName(u32 guest_cls) {
-    if(!threadHandle.jit) return false;
+    if(!threadHandle.interp) return false;
     static u32 guestPtr = 0;
     if(!guestPtr) guestPtr = guest_dlsym("class_getName");
     u32 args[] = {guest_cls};
@@ -315,20 +315,20 @@ u32 guest_class_getName(u32 guest_cls) {
 
 u32 guest_class_getSuperclass(u32 guest_cls) {
     if(!guest_cls) return 0;
-    return sharedHandle.ucb->MemoryRead32(guest_cls + 4);
+    return mem_read32(guest_cls + 4);
 }
 
 u32 guest_ivar_getName(u32 guest_ivar) {
-    return sharedHandle.ucb->MemoryRead32(guest_ivar + sizeof(u32[1]));
+    return mem_read32(guest_ivar + sizeof(u32[1]));
 }
 
 u32 guest_ivar_getTypeEncoding(u32 guest_ivar) {
-    return sharedHandle.ucb->MemoryRead32(guest_ivar + sizeof(u32[2]));
+    return mem_read32(guest_ivar + sizeof(u32[2]));
 }
 
 u32 guest_object_getClass(u32 guest_obj) {
     if(!guest_obj) return 0;
-    return sharedHandle.ucb->MemoryRead32(guest_obj);
+    return mem_read32(guest_obj);
 }
 
 u32 guest_object_setInstanceVariable(u32 guest_obj, const char *host_name, u32 newValue) {
@@ -340,7 +340,7 @@ u32 guest_object_setInstanceVariable(u32 guest_obj, const char *host_name, u32 n
 }
 
 u32 guest_protocol_getName(u32 guest_protocol) {
-    return sharedHandle.ucb->MemoryRead32(guest_protocol + sizeof(u32[1]));
+    return mem_read32(guest_protocol + sizeof(u32[1]));
 }
 
 u32 guest_sel_registerName(const char *host_name) {
@@ -354,7 +354,7 @@ u32 guest_sel_registerName(const char *host_name) {
 //if(!guestPtr) guestPtr = guest_dlsym("LC32TestHostToGuestCall");
 //u32 args[] = {0x40404040, 0x41414141, 0x42424242, 0x43434343, 0x44444444, 0x45454545, 0x46464646, 0x47474747};
 u32 guest_objc_getClass(const char *name) {
-    if(!threadHandle.jit) return 0;
+    if(!threadHandle.interp) return 0;
     static u32 guestPtr = 0;
     if(!guestPtr) guestPtr = guest_dlsym("objc_getClass");
 
@@ -541,28 +541,28 @@ static const void *kGuestSelf = &kGuestSelf;
     // Register protocols
     list = guest_class_copyProtocolList([clsObject guest_self], &count);
     for(int i = 0; i < count; i++, list += sizeof(u32)) {
-        [self addGuestProtocol:sharedHandle.ucb->MemoryRead32(list) toClass:cls];
+        [self addGuestProtocol:mem_read32(list) toClass:cls];
     }
     //if(list) guest_free(list);
 
     // Register instance variables by wrapping to getter/setter. Required for loading storyboard
     list = guest_class_copyIvarList([clsObject guest_self], &count);
     for(int i = 0; i < count; i++, list += sizeof(u32)) {
-        [self addGuestIvar:sharedHandle.ucb->MemoryRead32(list) toClass:clsObject];
+        [self addGuestIvar:mem_read32(list) toClass:clsObject];
     }
     //if(list) guest_free(list);
 
     // Register class methods. Pass metaclass (cls) here!
     list = guest_class_copyMethodList([cls guest_self], &count);
     for(int i = 0; i < count; i++, list += sizeof(u32)) {
-        [self addGuestMethod:sharedHandle.ucb->MemoryRead32(list) selector:nil toClass:cls];
+        [self addGuestMethod:mem_read32(list) selector:nil toClass:cls];
     }
     //if(list) guest_free(list);
 
     // Register instance methods
     list = guest_class_copyMethodList([clsObject guest_self], &count);
     for(int i = 0; i < count; i++, list += sizeof(u32)) {
-        [self addGuestMethod:sharedHandle.ucb->MemoryRead32(list) selector:nil toClass:clsObject];
+        [self addGuestMethod:mem_read32(list) selector:nil toClass:clsObject];
     }
     //if(list) guest_free(list);
 }

@@ -116,12 +116,12 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
       arm_thread_state_t *state = (arm_thread_state_t *)((uint64_t)tc + sizeof(uint32_t)*4);
       state->__pc += target;
       for (int i = 0; i < 13; i++) {
-        threadHandle.jit->Regs()[i] = state->__r[i];
+        threadHandle.interp->ctx.regs[i] = state->__r[i];
       }
-      threadHandle.jit->Regs()[13] = state->__sp;
-      threadHandle.jit->Regs()[14] = state->__lr;
-      threadHandle.jit->Regs()[15] = state->__pc;
-      threadHandle.jit->SetCpsr(state->__cpsr);
+      threadHandle.interp->ctx.regs[13] = state->__sp;
+      threadHandle.interp->ctx.regs[14] = state->__lr;
+      threadHandle.interp->ctx.regs[15] = state->__pc;
+      threadHandle.interp->ctx.cpsr = state->__cpsr;
     }
   }
 
@@ -149,18 +149,7 @@ u32 prependString(u32& address, const char* fmt, ...) {
   return address;
 }
 
-int main(int argc, char* argv[], char* envp[]) {
-  const char *execPath;
-  if (getppid() == 1) {
-    // test app
-    execPath = "/var/mobile/Documents/TrollExperiments/CProjects/dynarmic/ipas/FS3 Mobile.app/FS3 Mobile";
-//"/var/mobile/Documents/TrollExperiments/CProjects/dynarmic/LiveExec32/test/a.out";
-  } else if (argc == 1) {
-    printf("Usage: %s <path> argv...\n", argv[0]);
-    return 1;
-  } else {
-    execPath = argv[1];
-  }
+int LiveExec32_run(const char *execPath) {
 
   Dynarmic_nativeInitialize();
   u32 execAddr = Dynarmic_map_file(false, 0x11000000, execPath);
@@ -169,7 +158,7 @@ int main(int argc, char* argv[], char* envp[]) {
   const char *dyldPath = getenv("DYLD_PATH");
   printf("Loading dyld at DYLD_PATH %s\n", dyldPath);
   Dynarmic_map_file(true, 0x10000000, dyldPath);
-  printf("entry point: 0x%x\n", threadHandle.jit->Regs()[15]);
+  printf("entry point: 0x%x\n", threadHandle.interp->ctx.regs[15]);
 
   setenv("ROOT_PATH", DEFAULT_ROOT_PATH, 0);
   const char *rootPath = getenv("ROOT_PATH");
@@ -186,21 +175,21 @@ int main(int argc, char* argv[], char* envp[]) {
 
   // commpage 0xffff4000+0x1000
   u32 commpage = Dynarmic_mmap(0xffff4000, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-  sharedHandle.ucb->MemoryWrite16(commpage + 0x1E, 3); // version
-  sharedHandle.ucb->MemoryWrite32(commpage + 0x20, 0x9000);
-  sharedHandle.ucb->MemoryWrite8(commpage + 0x22, 1); // number of CPUs
-  sharedHandle.ucb->MemoryWrite8(commpage + 0x24, DYN_PAGE_BITS); // 32-bit page shift
-  sharedHandle.ucb->MemoryWrite16(commpage + 0x26, 128); // cache line size, 32? 64?
-  //sharedHandle.ucb->MemoryWrite32(commpage + 0x28, 128); // sched count
-  sharedHandle.ucb->MemoryWrite8(commpage + 0x34, 1); // active CPU
-  sharedHandle.ucb->MemoryWrite8(commpage + 0x35, 1); // physical CPU
-  sharedHandle.ucb->MemoryWrite8(commpage + 0x36, 1); // logical CPU
-  sharedHandle.ucb->MemoryWrite8(commpage + 0x37, DYN_PAGE_BITS); // kernel page shift
-  sharedHandle.ucb->MemoryWrite32(commpage + 0x38, 0x40000000u); // max memory size, 1GB
+  mem_write16(commpage + 0x1E, 3); // version
+  mem_write32(commpage + 0x20, 0x9000);
+  mem_write8(commpage + 0x22, 1); // number of CPUs
+  mem_write8(commpage + 0x24, DYN_PAGE_BITS); // 32-bit page shift
+  mem_write16(commpage + 0x26, 128); // cache line size, 32? 64?
+  //mem_write32(commpage + 0x28, 128); // sched count
+  mem_write8(commpage + 0x34, 1); // active CPU
+  mem_write8(commpage + 0x35, 1); // physical CPU
+  mem_write8(commpage + 0x36, 1); // logical CPU
+  mem_write8(commpage + 0x37, DYN_PAGE_BITS); // kernel page shift
+  mem_write32(commpage + 0x38, 0x40000000u); // max memory size, 1GB
   // TODO: mach time stuff
-  //sharedHandle.ucb->MemoryWrite64(commpage + 0x40, 0x4141414141414141); // FIXME
-  //sharedHandle.ucb->MemoryWrite64(commpage + 0x80, 0x41414141); // FIXME
-  sharedHandle.ucb->MemoryWrite64(commpage + 0x84, 1); // dev firmware
+  //mem_write64(commpage + 0x40, 0x4141414141414141); // FIXME
+  //mem_write64(commpage + 0x80, 0x41414141); // FIXME
+  mem_write64(commpage + 0x84, 1); // dev firmware
   
   // allocate stack guards and stack buffer for dyld
   u32 dyldStackGuardStart = Dynarmic_mmap(0x80000000, 0x1000, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -240,11 +229,8 @@ int main(int argc, char* argv[], char* envp[]) {
     //prependString(dyldStackPtr, "MallocLogFile=/tmp/a.malloc.log")
   };
   u32 guest_argv[1000] = {0};
-  guest_argv[0] = argc - 1;
-  // CAUTION: write backwards!!
-  for (int i = argc-1; i >= 1; i--) {
-    guest_argv[i] = prependString(dyldStackPtr, "%s", argv[i]);
-  }
+  guest_argv[0] = 1;
+  guest_argv[1] = prependString(dyldStackPtr, "%s", execPath);
 
   // align
   dyldStackPtr &= ~(sizeof(u32)-1);
@@ -256,26 +242,27 @@ int main(int argc, char* argv[], char* envp[]) {
 
   // write apple
   for (int i = 0; i < sizeof(guest_apple)/sizeof(u32); i++) {
-    sharedHandle.ucb->MemoryWrite32(dyldStackPtr -= sizeof(u32), guest_apple[i]);
+    mem_write32(dyldStackPtr -= sizeof(u32), guest_apple[i]);
   }
 
   // write envp
   for (int i = 0; i < sizeof(guest_envp)/sizeof(u32); i++) {
-    sharedHandle.ucb->MemoryWrite32(dyldStackPtr -= sizeof(u32), guest_envp[i]);
+    mem_write32(dyldStackPtr -= sizeof(u32), guest_envp[i]);
   }
 
   // write argv and argc
-  for (int i = argc; i >= 0; i--) {
-    sharedHandle.ucb->MemoryWrite32(dyldStackPtr -= sizeof(u32), guest_argv[i]);
+  for (int i = 1; i >= 0; i--) {
+    mem_write32(dyldStackPtr -= sizeof(u32), guest_argv[i]);
   }
 
   // write main executable base
-  sharedHandle.ucb->MemoryWrite32(dyldStackPtr -= sizeof(u32), execAddr);
+  mem_write32(dyldStackPtr -= sizeof(u32), execAddr);
 
   printf("stack ptr now 0x%x\n", dyldStackPtr);
 
   Dynarmic_reg_1write(13, dyldStackPtr);
-  Dynarmic_emu_1start(threadHandle.jit->Regs()[15]);
+  Dynarmic_emu_1start(threadHandle.interp->ctx.regs[15]);
+  return 0;
 }
 
 }

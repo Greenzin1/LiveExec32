@@ -1,23 +1,22 @@
 ARCHS := arm64
 TARGET := iphone:clang:latest:16.0
-#TARGET_CODESIGN = fastPathSign
 PACKAGE_FORMAT := ipa
 
 include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = LiveExec32
-#TOOL_NAME = LiveExec32
 
 LiveExec32_FILES = \
-  main.cpp arm_dynarmic_cp15.cpp dynarmic.cpp filesystem.cpp variables.cpp ap_getparents.c \
+  LC32Main.m AppDelegate.m LC32ViewController.mm \
+  main.cpp arm_dynarmic_cp15.cpp dynarmic.cpp arm_interpreter.cpp filesystem.cpp variables.cpp ap_getparents.c \
   bridge.mm bridge.s log.m \
   HostFrameworks/Foundation/Foundation.mm \
   HostFrameworks/CoreGraphics/CoreGraphics.mm \
   HostFrameworks/UIKit/UIKit.mm
-LiveExec32_CFLAGS = -Iinclude -DDYNARMIC_MASTER -Wno-error
-LiveExec32_LDFLAGS = -Llib -ldynarmic
+LiveExec32_CFLAGS = -Iinclude -Wno-error
+LiveExec32_CCFLAGS = -std=c++17
+LiveExec32_LDFLAGS =
 LiveExec32_CODESIGN_FLAGS = -Sentitlements.plist
-#LiveExec32_INSTALL_PATH = /usr/local/bin
+LiveExec32_INFOPLIST_FLAGS = -UIFileSharingEnabled YES -ULaunchStoryboardName
 
 include $(THEOS_MAKE_PATH)/application.mk
-#include $(THEOS_MAKE_PATH)/tool.mk

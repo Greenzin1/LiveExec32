@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <exception>
 #include <iostream>
+#include <optional>
 
 #include <assert.h>
 #include <fcntl.h>
@@ -88,6 +89,68 @@ LcarryClear: \n \
     b _return_with_carry_direct \n \
 ");
 
+// Free-standing memory access helpers (used before DynarmicCallbacks32 is defined)
+char *get_memory_page(u64 vaddr) {
+    size_t num_page_table_entries = sharedHandle.num_page_table_entries;
+    void **page_table = sharedHandle.page_table;
+    khash_t(memory) *memory = sharedHandle.memory;
+    u64 idx = vaddr >> DYN_PAGE_BITS;
+    if(page_table && idx < num_page_table_entries) {
+      return (char *)page_table[idx];
+    }
+    u64 base = vaddr & ~DYN_PAGE_MASK;
+    khiter_t k = kh_get(memory, memory, base);
+    if(k == kh_end(memory)) {
+      return NULL;
+    }
+    t_memory_page page = kh_value(memory, k);
+    return (char *)page->addr;
+}
+
+inline void *get_memory(u64 vaddr) {
+    char *page = get_memory_page(vaddr);
+    return page ? &page[vaddr & DYN_PAGE_MASK] : NULL;
+}
+
+static inline u8 mem_read8_simple(u32 vaddr) {
+    u8 *dest = (u8 *)get_memory(vaddr);
+    return dest ? *dest : 0;
+}
+static inline u16 mem_read16_simple(u32 vaddr) {
+    if(vaddr & 1) return (u16)mem_read8_simple(vaddr) | ((u16)mem_read8_simple(vaddr+1) << 8);
+    u16 *dest = (u16 *)get_memory(vaddr);
+    return dest ? *dest : 0;
+}
+static inline u32 mem_read32_simple(u32 vaddr) {
+    if(vaddr & 3) return (u32)mem_read16_simple(vaddr) | ((u32)mem_read16_simple(vaddr+2) << 16);
+    u32 *dest = (u32 *)get_memory(vaddr);
+    return dest ? *dest : 0;
+}
+static inline u64 mem_read64_simple(u32 vaddr) {
+    if(vaddr & 7) return (u64)mem_read32_simple(vaddr) | ((u64)mem_read32_simple(vaddr+4) << 32);
+    u64 *dest = (u64 *)get_memory(vaddr);
+    return dest ? *dest : 0;
+}
+static inline void mem_write8_simple(u32 vaddr, u8 val) {
+    u8 *dest = (u8 *)get_memory(vaddr);
+    if(dest) *dest = val;
+}
+static inline void mem_write16_simple(u32 vaddr, u16 val) {
+    if(vaddr & 1) { mem_write8_simple(vaddr, val); mem_write8_simple(vaddr+1, val>>8); return; }
+    u16 *dest = (u16 *)get_memory(vaddr);
+    if(dest) *dest = val;
+}
+static inline void mem_write32_simple(u32 vaddr, u32 val) {
+    if(vaddr & 3) { mem_write16_simple(vaddr, val); mem_write16_simple(vaddr+2, val>>16); return; }
+    u32 *dest = (u32 *)get_memory(vaddr);
+    if(dest) *dest = val;
+}
+static inline void mem_write64_simple(u32 vaddr, u64 val) {
+    if(vaddr & 7) { mem_write32_simple(vaddr, val); mem_write32_simple(vaddr+4, val>>32); return; }
+    u64 *dest = (u64 *)get_memory(vaddr);
+    if(dest) *dest = val;
+}
+
 // guest syscalls
 int guest_csops(pid_t pid, unsigned int ops, u32 guest_useraddr, size_t usersize) {
     char *host_useraddr = (char *)malloc(usersize);
@@ -144,7 +207,7 @@ int guest___sysctl(u32 guest_name, u_int namelen, u32 guest_oldp, u32 guest_oldl
 
     if(guest_oldp) {
         Dynarmic_mem_1write(guest_oldp, host_oldlenp, host_oldp);
-        sharedHandle.ucb->MemoryWrite32(guest_oldlenp, host_oldlenp);
+        mem_write32_simple(guest_oldlenp, host_oldlenp);
     }
     return result;
 }
@@ -172,7 +235,7 @@ int guest___sysctlbyname(u32 guest_name, u_int namelen, u32 guest_oldp, u32 gues
 
     if(guest_oldp) {
         Dynarmic_mem_1write(guest_oldp, host_oldlenp, host_oldp);
-        sharedHandle.ucb->MemoryWrite32(guest_oldlenp, host_oldlenp);
+        mem_write32_simple(guest_oldlenp, host_oldlenp);
     }
     return result;
 }
@@ -198,8 +261,8 @@ int guest_shm_open(u32 guest_name, int oflag, int mode) {
 int	 guest_pthread_getugid_np(u32 uid, u32 gid) {
     uid_t host_uid, host_gid;
     int result = pthread_getugid_np(&host_uid, &host_gid);
-    sharedHandle.ucb->MemoryWrite32(uid, host_uid);
-    sharedHandle.ucb->MemoryWrite32(gid, host_gid);
+    mem_write32_simple(uid, host_uid);
+    mem_write32_simple(gid, host_gid);
     return result;
 }
 
@@ -241,7 +304,8 @@ guest_mach_msg_trap(u32 guest_msg,
                 Mess->Out.RetCode = result;
             } else {
                 printf("LC32: Unhandled flavor %d\n", Mess->In.flavor);
-                sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
+                printf("ExceptionRaised: pc=0xDEADDEAD, exception=%d\n", 0);
+                abort();
             }
             break;
         }
@@ -352,7 +416,7 @@ guest_mach_msg_trap(u32 guest_msg,
         }
         default:
             printf("LC32: Unhandled msgh_id\n");
-            sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
+            printf("ExceptionRaised: pc=0xDEADDEAD, exception=%d\n", 0); abort();
             break;
     }
 
@@ -367,11 +431,11 @@ guest_mach_msg_trap(u32 guest_msg,
 
 int guest_getdirentries64(int fd, u32 guest_buf, int nbytes, u32 guest_basep) {
     char *host_buf = (char *)malloc(nbytes);
-    __darwin_off_t host_basep = (__darwin_off_t)sharedHandle.ucb->MemoryRead32(guest_basep); // is reading needed?
+    __darwin_off_t host_basep = (__darwin_off_t)mem_read32_simple(guest_basep); // is reading needed?
     // FIXME: is this correct?
     int result = syscallRetCarry(SYS_getdirentries64, fd, host_buf, nbytes, &host_basep, 0,0,0);
     Dynarmic_mem_1write(guest_buf, nbytes, host_buf);
-    sharedHandle.ucb->MemoryWrite64(guest_basep, host_basep);
+    mem_write64_simple(guest_basep, host_basep);
     free(host_buf);
     return result;
 }
@@ -620,11 +684,11 @@ int guest_sigaction(int sig, u32 guest_act, u32 guest_oact) {
 }
 
 int guest_sigprocmask(int how, u32 guest_set, u32 guest_oldset) {
-    sigset_t host_set = guest_set ? sharedHandle.ucb->MemoryRead32(guest_set) : 0;
+    sigset_t host_set = guest_set ? mem_read32_simple(guest_set) : 0;
     sigset_t host_oldset = 0;
     int result = syscallRetCarry(SYS_sigprocmask, how, guest_set ? &host_set : NULL, &host_oldset, 0,0,0,0);
     if (guest_oldset) {
-        sharedHandle.ucb->MemoryWrite32(guest_oldset, host_oldset);
+        mem_write32_simple(guest_oldset, host_oldset);
     }
     return result;
 }
@@ -644,20 +708,20 @@ int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
     case FIODTYPE:
         int host_r2;
         int result = syscallRetCarry(SYS_ioctl, fildes, request, &host_r2, 0,0,0,0);
-        sharedHandle.ucb->MemoryWrite32(guest_r2, host_r2);
+        mem_write32_simple(guest_r2, host_r2);
         return result;
     }
     printf("Unhandled ioctl request: %d (0x%x)\n", request, request);
-    sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
+    printf("ExceptionRaised: pc=0xDEADDEAD, exception=%d\n", 0); abort();
     return -1;
 }
 
 int guest_pthread_sigmask(int how, u32 guest_set, u32 guest_oldset) {
-    sigset_t host_set = guest_set ? sharedHandle.ucb->MemoryRead32(guest_set) : 0;
+    sigset_t host_set = guest_set ? mem_read32_simple(guest_set) : 0;
     sigset_t host_oldset = 0;
     int result = pthread_sigmask(how, guest_set ? &host_set : NULL, &host_oldset);
     if (guest_oldset) {
-        sharedHandle.ucb->MemoryWrite32(guest_oldset, host_oldset);
+        mem_write32_simple(guest_oldset, host_oldset);
     }
     // FIXME: does it need carry bit upon error?
     return result;
@@ -708,7 +772,7 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
             return syscallRetCarry(SYS_fcntl, fildes, cmd, guest_r2, 0,0,0,0);
         case F_ADDFILESIGS_RETURN:
             // fsig->fs_file_start = 0xFFFFFFFF;
-            sharedHandle.ucb->MemoryWrite32(guest_r2, 0xFFFFFFFF);
+            mem_write32_simple(guest_r2, 0xFFFFFFFF);
             return 0;
         case F_CHECK_LV:
             return 0;
@@ -725,7 +789,7 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
             return syscallRetCarry(SYS_fcntl, fildes, cmd, &host_r2, 0,0,0,0);
         }
         case F_SETSIZE: {
-            off_t host_r2 = sharedHandle.ucb->MemoryRead64(guest_r2);
+            off_t host_r2 = mem_read64_simple(guest_r2);
             return syscallRetCarry(SYS_fcntl, fildes, cmd, &host_r2);
         }
         case F_RDADVISE: {
@@ -745,7 +809,7 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
         }
         default:
             printf("Unhandled fcntl command: %d\n", cmd);
-            sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
+            printf("ExceptionRaised: pc=0xDEADDEAD, exception=%d\n", 0); abort();
             return syscallRetCarry(SYS_fcntl, fildes, cmd, guest_r2, 0,0,0,0);
     }
 }
@@ -777,7 +841,7 @@ kern_return_t guest_host_create_mach_voucher_trap(mach_port_name_t host, u32 gue
     Dynarmic_mem_1read(guest_recipes, recipes_size, (char *)host_recipes);
     mach_port_name_t host_voucher;
     kern_return_t result = host_create_mach_voucher_trap(host, host_recipes, recipes_size, &host_voucher);
-    sharedHandle.ucb->MemoryWrite32(guest_voucher, host_voucher);
+    mem_write32_simple(guest_voucher, host_voucher);
     return result;
 }
 
@@ -791,9 +855,9 @@ kern_return_t guest__kernelrpc_mach_vm_allocate_trap(u32 target, u32 guest_addre
     bool anywhere = (flags & VM_FLAGS_ANYWHERE) != 0;
     if (anywhere) {
         // Sometimes the address pointer will contain garbage value, change it to 0
-        sharedHandle.ucb->MemoryWrite32(guest_address, 0);
+        mem_write32_simple(guest_address, 0);
     }
-    u32 result = Dynarmic_mmap(sharedHandle.ucb->MemoryRead32(guest_address), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | (anywhere ? 0 : MAP_FIXED), -1, 0);
+    u32 result = Dynarmic_mmap(mem_read32_simple(guest_address), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | (anywhere ? 0 : MAP_FIXED), -1, 0);
     if (result == -1) {
 /*
         if (!anywhere && tag != VM_MEMORY_REALLOC) {
@@ -803,7 +867,7 @@ kern_return_t guest__kernelrpc_mach_vm_allocate_trap(u32 target, u32 guest_addre
 */
         return KERN_NO_SPACE;
     }
-    sharedHandle.ucb->MemoryWrite32(guest_address, result);
+    mem_write32_simple(guest_address, result);
     return KERN_SUCCESS;
 }
 
@@ -812,14 +876,14 @@ kern_return_t guest__kernelrpc_mach_port_construct_trap(mach_port_name_t target,
     mach_port_name_t host_name;
     Dynarmic_mem_1read(guest_options, sizeof(host_options), (char *)&host_options);
     kern_return_t result = _kernelrpc_mach_port_construct_trap(target, &host_options, context, &host_name);
-    sharedHandle.ucb->MemoryWrite32(guest_name, host_name);
+    mem_write32_simple(guest_name, host_name);
     return result;
 }
 
 kern_return_t guest__kernelrpc_mach_port_allocate_trap(mach_port_name_t target, mach_port_right_t right, u32 guest_name) {
     mach_port_name_t host_name;
     kern_return_t result = _kernelrpc_mach_port_allocate_trap(target, right, &host_name);
-    sharedHandle.ucb->MemoryWrite32(guest_name, host_name);
+    mem_write32_simple(guest_name, host_name);
     return result;
 }
 
@@ -833,11 +897,11 @@ kern_return_t guest__kernelrpc_mach_vm_map_trap(mach_port_name_t target, u32 gue
         printf("LC32: BackendException: _kernelrpc_mach_vm_map_trap fixed\n");
         return KERN_FAILURE;
     }
-    u32 result = Dynarmic_mmap(sharedHandle.ucb->MemoryRead32(guest_address), size, cur_protection, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, mask ?: DYN_PAGE_MASK);
+    u32 result = Dynarmic_mmap(mem_read32_simple(guest_address), size, cur_protection, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, mask ?: DYN_PAGE_MASK);
     if (result == -1) {
         return KERN_NO_SPACE;
     }
-    sharedHandle.ucb->MemoryWrite32(guest_address, result);
+    mem_write32_simple(guest_address, result);
     return KERN_SUCCESS;
 }
 
@@ -905,10 +969,10 @@ static void load_symbols_for_image(guest_file_mapping *mapping, void(^iterator)(
   }
 
   for(int i=0; i < symtab_cmd->nsyms; i++) {
-    u32 addr = strtab + sharedHandle.ucb->MemoryRead32((u32)(u64)&symtab[i].n_un.n_strx);
+    u32 addr = strtab + mem_read32_simple((u32)(u64)&symtab[i].n_un.n_strx);
     //u32 host_addr = host_strtab +
     if(!get_memory(addr)) continue;
-    u64 symbolAddr = sharedHandle.ucb->MemoryRead32((u32)(u64)&symtab[i].n_value) + slide;
+    u64 symbolAddr = mem_read32_simple((u32)(u64)&symtab[i].n_value) + slide;
     u64 hostSymbolAddr = host_symtab[i].n_value + slide;
     DynarmicHostString host_sym(addr);
     if(*host_sym.hostPtr) {
@@ -942,51 +1006,55 @@ void symbolicate_call_stack(symbolicated_call *callStack, int callStackLen) {
   }
 }
 
-char *get_memory_page(u64 vaddr) {
-    size_t num_page_table_entries = sharedHandle.num_page_table_entries;
-    void **page_table = sharedHandle.page_table;
-    khash_t(memory) *memory = sharedHandle.memory;
-    u64 idx = vaddr >> DYN_PAGE_BITS;
-    if(page_table && idx < num_page_table_entries) {
-      return (char *)page_table[idx];
+class LiveExecArmCallbacks : public ArmCallbacks {
+public:
+    u32 mem_read(u32 addr, int size) override {
+        switch(size) {
+            case 1: return mem_read8_simple(addr);
+            case 2: return mem_read16_simple(addr);
+            case 4: return mem_read32_simple(addr);
+            default: return 0;
+        }
     }
-    u64 base = vaddr & ~DYN_PAGE_MASK;
-    khiter_t k = kh_get(memory, memory, base);
-    if(k == kh_end(memory)) {
-      return NULL;
+
+    void mem_write(u32 addr, u32 value, int size) override {
+        switch(size) {
+            case 1: mem_write8_simple(addr, (u8)value); break;
+            case 2: mem_write16_simple(addr, (u16)value); break;
+            case 4: mem_write32_simple(addr, value); break;
+        }
     }
-    t_memory_page page = kh_value(memory, k);
-    return (char *)page->addr;
-}
 
-inline void *get_memory(u64 vaddr) {
-    char *page = get_memory_page(vaddr);
-    return page ? &page[vaddr & DYN_PAGE_MASK] : NULL;
-}
+    void svc_hook(u32 pc) override {
+        // Just halt - the outer Dynarmic_emu_1start loop handles SVC dispatch
+        threadHandle.interp->running = false;
+    }
+};
 
-class DynarmicCallbacks32 final : public Dynarmic::A32::UserCallbacks {
+class DynarmicCallbacks32 final {
 private:
     ~DynarmicCallbacks32() = default;
 
 public:
     void destroy() {
+        delete this->cp15;
         this->cp15 = nullptr;
         delete this;
     }
 
     DynarmicCallbacks32(khash_t(memory) *memory)
-        : memory{memory}, cp15(std::make_shared<DynarmicCP15>()) {}
+        : memory{memory}, cp15(new DynarmicCP15()) {}
 
-    bool IsReadOnlyMemory(u32 vaddr) override {
+    bool IsReadOnlyMemory(u32 vaddr) {
 //        u32 idx;
 //        return mem_map && (idx = vaddr >> DYN_PAGE_BITS) < num_page_table_entries && mem_map[idx] & PAGE_EXISTS_BIT && (mem_map[idx] & UC_PROT_WRITE) == 0;
         return false;
     }
 
-    std::optional<uint32_t> MemoryReadCode(u32 vaddr) override {
+    std::optional<uint32_t> MemoryReadCode(u32 vaddr) {
 #if TRACE_BRANCH
         static u32 lastRead;
-        if (vaddr - lastRead != 4 && vaddr == cpu->Regs()[15]) {
+        if (vaddr - lastRead != 4 && vaddr == threadHandle.interp->ctx.regs[15]) {
             lastRead = vaddr;
             DumpBacktrace(false);
         }
@@ -1006,7 +1074,7 @@ public:
 #endif
     }
 
-    u8 MemoryRead8(u32 vaddr) override {
+    u8 MemoryRead8(u32 vaddr) {
         u8 *dest = (u8 *) get_memory(vaddr);
         if(dest) {
 #if TRACE_RW
@@ -1043,7 +1111,7 @@ public:
             return 0;
         }
     }
-    u16 MemoryRead16(u32 vaddr) override {
+    u16 MemoryRead16(u32 vaddr) {
         return MemoryRead16(vaddr, true);
     }
     u32 MemoryRead32(u32 vaddr, bool trace) {
@@ -1071,10 +1139,10 @@ public:
             return 0;
         }
     }
-    u32 MemoryRead32(u32 vaddr) override {
+    u32 MemoryRead32(u32 vaddr) {
         return MemoryRead32(vaddr, true);
     }
-    u64 MemoryRead64(u32 vaddr) override {
+    u64 MemoryRead64(u32 vaddr) {
         if(vaddr & 7) {
             const u32 a{MemoryRead32(vaddr)};
             const u32 b{MemoryRead32(vaddr + sizeof(u32))};
@@ -1093,7 +1161,7 @@ public:
         }
     }
 
-    void MemoryWrite8(u32 vaddr, u8 value) override {
+    void MemoryWrite8(u32 vaddr, u8 value) {
         u8 *dest = (u8 *) get_memory(vaddr);
         if(dest) {
 #if TRACE_RW
@@ -1105,7 +1173,7 @@ public:
             HandleBadMemoryAccess();
         }
     }
-    void MemoryWrite16(u32 vaddr, u16 value) override {
+    void MemoryWrite16(u32 vaddr, u16 value) {
         if(vaddr & 1) {
             MemoryWrite8(vaddr, static_cast<u8>(value));
             MemoryWrite8(vaddr + sizeof(u8), static_cast<u8>(value >> 8));
@@ -1122,7 +1190,7 @@ public:
             HandleBadMemoryAccess();
         }
     }
-    void MemoryWrite32(u32 vaddr, u32 value) override {
+    void MemoryWrite32(u32 vaddr, u32 value) {
         if(vaddr & 3) {
             MemoryWrite16(vaddr, static_cast<u16>(value));
             MemoryWrite16(vaddr + sizeof(u16), static_cast<u16>(value >> 16));
@@ -1139,7 +1207,7 @@ public:
             HandleBadMemoryAccess();
         }
     }
-    void MemoryWrite64(u32 vaddr, u64 value) override {
+    void MemoryWrite64(u32 vaddr, u64 value) {
         if(vaddr & 7) {
             MemoryWrite32(vaddr, static_cast<u32>(value));
             MemoryWrite32(vaddr + sizeof(u32), static_cast<u32>(value >> 32));
@@ -1157,28 +1225,28 @@ public:
         }
     }
 
-    bool MemoryWriteExclusive8(u32 vaddr, u8 value, u8 expected) override {
+    bool MemoryWriteExclusive8(u32 vaddr, u8 value, u8 expected) {
         bool write = MemoryRead8(vaddr) == expected;
         if(write) {
             MemoryWrite8(vaddr, value);
         }
         return write;
     }
-    bool MemoryWriteExclusive16(u32 vaddr, u16 value, u16 expected) override {
+    bool MemoryWriteExclusive16(u32 vaddr, u16 value, u16 expected) {
         bool write = MemoryRead16(vaddr) == expected;
         if(write) {
             MemoryWrite16(vaddr, value);
         }
         return write;
     }
-    bool MemoryWriteExclusive32(u32 vaddr, u32 value, u32 expected) override {
+    bool MemoryWriteExclusive32(u32 vaddr, u32 value, u32 expected) {
         bool write = MemoryRead32(vaddr) == expected;
         if(write) {
             MemoryWrite32(vaddr, value);
         }
         return write;
     }
-    bool MemoryWriteExclusive64(u32 vaddr, u64 value, u64 expected) override {
+    bool MemoryWriteExclusive64(u32 vaddr, u64 value, u64 expected) {
         bool write = MemoryRead64(vaddr) == expected;
         if(write) {
             MemoryWrite64(vaddr, value);
@@ -1186,8 +1254,8 @@ public:
         return write;
     }
 
-    void InterpreterFallback(u32 pc, std::size_t num_instructions) override {
-        cpu->HaltExecution();
+    void InterpreterFallback(u32 pc, std::size_t num_instructions) {
+        threadHandle.interp->halted = true;
         std::optional<std::uint32_t> code = MemoryReadCode(pc);
         if(code) {
             fprintf(stderr, "Unicorn fallback @ 0x%x for %lu instructions (instr = 0x%08X)", pc, num_instructions, *(cpsr->isThumb() ? MemoryReadThumbCode(pc) : MemoryReadCode(pc)));
@@ -1195,8 +1263,8 @@ public:
         DumpCrashReport();
     }
 
-    void ExceptionRaised(u32 pc, Dynarmic::A32::Exception exception) override {
-        bool isBkpt = exception == Dynarmic::A32::Exception::Breakpoint;
+    void ExceptionRaised(u32 pc, int exception) {
+        bool isBkpt = exception == 1; // Dynarmic::A32::Exception::Breakpoint
         u32 code = *(cpsr->isThumb() ? MemoryReadThumbCode(pc) : MemoryReadCode(pc));
         if(isBkpt) {
             printf("Breakpoint!\n");
@@ -1224,15 +1292,15 @@ public:
 
         printf("# %s\n", crash ? "CRASHED" : "Branch");
         printf("Registers: \n");
-        printf(" r0 0x%08x  r1 0x%08x  r2 0x%08x  r3 0x%08x\n", cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
-        printf(" r4 0x%08x  r5 0x%08x  r6 0x%08x  r7 0x%08x\n", cpu->Regs()[4], cpu->Regs()[5], cpu->Regs()[6], cpu->Regs()[7]);
-        printf(" r8 0x%08x  r9 0x%08x r10 0x%08x r11 0x%08x\n", cpu->Regs()[8], cpu->Regs()[9], cpu->Regs()[10], cpu->Regs()[11]);
-        printf("r12 0x%08x  sp 0x%08x  lr 0x%08x  pc 0x%08x\n", cpu->Regs()[12], cpu->Regs()[13], cpu->Regs()[14], cpu->Regs()[15]);
-        printf("CPSR: 0x%08x thumb(%d) N(%d) Z(%d) C(%d) V(%d)\n", cpu->Cpsr(), threadHandle.cpsr->isThumb(), threadHandle.cpsr->isNegative(), threadHandle.cpsr->isZero(), threadHandle.cpsr->hasCarry(), threadHandle.cpsr->isOverflow());
+        printf(" r0 0x%08x  r1 0x%08x  r2 0x%08x  r3 0x%08x\n", threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3]);
+        printf(" r4 0x%08x  r5 0x%08x  r6 0x%08x  r7 0x%08x\n", threadHandle.interp->ctx.regs[4], threadHandle.interp->ctx.regs[5], threadHandle.interp->ctx.regs[6], threadHandle.interp->ctx.regs[7]);
+        printf(" r8 0x%08x  r9 0x%08x r10 0x%08x r11 0x%08x\n", threadHandle.interp->ctx.regs[8], threadHandle.interp->ctx.regs[9], threadHandle.interp->ctx.regs[10], threadHandle.interp->ctx.regs[11]);
+        printf("r12 0x%08x  sp 0x%08x  lr 0x%08x  pc 0x%08x\n", threadHandle.interp->ctx.regs[12], threadHandle.interp->ctx.regs[13], threadHandle.interp->ctx.regs[14], threadHandle.interp->ctx.regs[15]);
+        printf("CPSR: 0x%08x thumb(%d) N(%d) Z(%d) C(%d) V(%d)\n", threadHandle.interp->ctx.cpsr, threadHandle.cpsr->isThumb(), threadHandle.cpsr->isNegative(), threadHandle.cpsr->isZero(), threadHandle.cpsr->hasCarry(), threadHandle.cpsr->isOverflow());
 
-        u32 pc = cpu->Regs()[15];
-        u32 lr = cpu->Regs()[14];
-        u32 fp = cpu->Regs()[7];
+        u32 pc = threadHandle.interp->ctx.regs[15];
+        u32 lr = threadHandle.interp->ctx.regs[14];
+        u32 fp = threadHandle.interp->ctx.regs[7];
 
         struct symbolicated_call callStack[0x100] = {{0}};
         int callStackLen = 0;
@@ -1267,10 +1335,10 @@ public:
         if (crash) abort();
     }
 
-    void CallSVC(u32 swi) override {
-        int NR = cpu->Regs()[12];
-        if (swi == 0 && cpu->Regs()[5] == POST_CALLBACK_SYSCALL_NUMBER && cpu->Regs()[7] == 0) { // postCallback
-            int number = cpu->Regs()[4];
+    void CallSVC(u32 swi) {
+        int NR = threadHandle.interp->ctx.regs[12];
+        if (swi == 0 && threadHandle.interp->ctx.regs[5] == POST_CALLBACK_SYSCALL_NUMBER && threadHandle.interp->ctx.regs[7] == 0) { // postCallback
+            int number = threadHandle.interp->ctx.regs[4];
 /*
             Svc svc = svcMemory.getSvc(number);
             if (svc != null) {
@@ -1282,8 +1350,8 @@ public:
             printf("svc number: %d\n", number);
             DumpCrashReport();
         }
-        if (swi == 0 && cpu->Regs()[5] == PRE_CALLBACK_SYSCALL_NUMBER && cpu->Regs()[7] == 0) { // preCallback
-            int number = cpu->Regs()[4];
+        if (swi == 0 && threadHandle.interp->ctx.regs[5] == PRE_CALLBACK_SYSCALL_NUMBER && threadHandle.interp->ctx.regs[7] == 0) { // preCallback
+            int number = threadHandle.interp->ctx.regs[4];
 /*
             Svc svc = svcMemory.getSvc(number);
             if (svc != null) {
@@ -1349,158 +1417,158 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case SYS_socket: // 97
             case SYS_issetugid: // 327
             case SYS_close_nocancel: // 399
-                cpu->Regs()[0] = syscallRetCarry(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
+                threadHandle.interp->ctx.regs[0] = syscallRetCarry(NR, threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3]);
                 cpsr->setCarry(false); // FIXME: mach_reply_port sets carry to true, idk why
                 break;
             // direct calls with 0-2 arguments, returns 64bit value
             case -18: // _kernelrpc_mach_port_deallocate_trap
             case -3: // mach_absolute_time
             case 372: { // thread_selfid
-                u64 result = syscallRetCarry((long)NR, cpu->Regs()[0], cpu->Regs()[1]);
-                cpu->Regs()[0] = (u32)result;
-                cpu->Regs()[1] = (u32)(result >> 32);
+                u64 result = syscallRetCarry((long)NR, threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
+                threadHandle.interp->ctx.regs[0] = (u32)result;
+                threadHandle.interp->ctx.regs[1] = (u32)(result >> 32);
             } break;
             // direct call with custom args
             case 423: // semwait_signal_nocancel
-                cpu->Regs()[0] = syscallRetCarry(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4] | ((u64)cpu->Regs()[5] << 32), cpu->Regs()[6]);
+                threadHandle.interp->ctx.regs[0] = syscallRetCarry(NR, threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[4] | ((u64)threadHandle.interp->ctx.regs[5] << 32), threadHandle.interp->ctx.regs[6]);
                 break;
             // the rest are indirect calls
             case -89:
-                cpu->Regs()[0] = guest_mach_timebase_info(cpu->Regs()[0]);
+                threadHandle.interp->ctx.regs[0] = guest_mach_timebase_info(threadHandle.interp->ctx.regs[0]);
                 break;
             case -70:
-                cpu->Regs()[0] = guest_host_create_mach_voucher_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
+                threadHandle.interp->ctx.regs[0] = guest_host_create_mach_voucher_trap(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3]);
                 break;
             case -31:
-                cpu->Regs()[0] = guest_mach_msg_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5], cpu->Regs()[6]);
+                threadHandle.interp->ctx.regs[0] = guest_mach_msg_trap(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[4], threadHandle.interp->ctx.regs[5], threadHandle.interp->ctx.regs[6]);
                 break;
             case -24:
-                cpu->Regs()[0] = guest__kernelrpc_mach_port_construct_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32), cpu->Regs()[4]);
+                threadHandle.interp->ctx.regs[0] = guest__kernelrpc_mach_port_construct_trap(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2] | ((u64)threadHandle.interp->ctx.regs[3] << 32), threadHandle.interp->ctx.regs[4]);
                 break;
             case -16: // _kernelrpc_mach_port_allocate_trap
-                cpu->Regs()[0] = guest__kernelrpc_mach_port_allocate_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest__kernelrpc_mach_port_allocate_trap(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case -15:
                 // NOTE: skip r7 since it's frame pointer
-                cpu->Regs()[0] = guest__kernelrpc_mach_vm_map_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32), cpu->Regs()[4] | ((u64)cpu->Regs()[5] << 32), cpu->Regs()[6], cpu->Regs()[8]);
+                threadHandle.interp->ctx.regs[0] = guest__kernelrpc_mach_vm_map_trap(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2] | ((u64)threadHandle.interp->ctx.regs[3] << 32), threadHandle.interp->ctx.regs[4] | ((u64)threadHandle.interp->ctx.regs[5] << 32), threadHandle.interp->ctx.regs[6], threadHandle.interp->ctx.regs[8]);
                 break;
             case -12:
-                cpu->Regs()[0] = guest__kernelrpc_mach_vm_deallocate_trap(cpu->Regs()[0], cpu->Regs()[1] | ((u64)cpu->Regs()[2] << 32), cpu->Regs()[3] | ((u64)cpu->Regs()[4] << 32));
+                threadHandle.interp->ctx.regs[0] = guest__kernelrpc_mach_vm_deallocate_trap(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1] | ((u64)threadHandle.interp->ctx.regs[2] << 32), threadHandle.interp->ctx.regs[3] | ((u64)threadHandle.interp->ctx.regs[4] << 32));
                 break;
             case -10:
-                cpu->Regs()[0] = guest__kernelrpc_mach_vm_allocate_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32), cpu->Regs()[4]);
+                threadHandle.interp->ctx.regs[0] = guest__kernelrpc_mach_vm_allocate_trap(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2] | ((u64)threadHandle.interp->ctx.regs[3] << 32), threadHandle.interp->ctx.regs[4]);
                 break;
             case SYS_syscall: {
-                printf("Warning: CallSVC(SYS_syscall, NR=%d) called. Be sure to check arguments\n", cpu->Regs()[0]);
-                cpu->Regs()[12] = cpu->Regs()[0];
+                printf("Warning: CallSVC(SYS_syscall, NR=%d) called. Be sure to check arguments\n", threadHandle.interp->ctx.regs[0]);
+                threadHandle.interp->ctx.regs[12] = threadHandle.interp->ctx.regs[0];
                 CallSVC(0x80);
                 break;
             }
             case SYS_exit: // 1
-                printf("Guest exited with code %d\n", cpu->Regs()[0]);
-                exit(cpu->Regs()[0]);
+                printf("Guest exited with code %d\n", threadHandle.interp->ctx.regs[0]);
+                exit(threadHandle.interp->ctx.regs[0]);
                 break;
             case SYS_fork: // 2
                 printf("fork() not supported\n");
-                cpu->Regs()[0] = ENOSYS;
+                threadHandle.interp->ctx.regs[0] = ENOSYS;
                 break;
             case SYS_read: // 3
             case SYS_read_nocancel: // 396
                 // Note: we don't use the cancel version cause unidbg also doesn't and it hangs
-                cpu->Regs()[0] = guest_read(SYS_read_nocancel, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_read(SYS_read_nocancel, threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case SYS_write: // 4
             case SYS_write_nocancel:
-                cpu->Regs()[0] = guest_write(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_write(NR, threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case SYS_open: // 5
             case SYS_open_nocancel:
                 // Note: we don't use the cancel version cause unidbg also doesn't and it hangs
-                cpu->Regs()[0] = guest_open(SYS_open_nocancel, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_open(SYS_open_nocancel, threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case SYS_unlink: // 10
-                cpu->Regs()[0] = guest_unlink(cpu->Regs()[0]);
+                threadHandle.interp->ctx.regs[0] = guest_unlink(threadHandle.interp->ctx.regs[0]);
                 break;
             case SYS_chmod: // 15
-                cpu->Regs()[0] = guest_chmod(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_chmod(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case SYS_chown: // 16
-                cpu->Regs()[0] = guest_chown(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_chown(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 33:
-                cpu->Regs()[0] = guest_access(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_access(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 46:
-                cpu->Regs()[0] = guest_sigaction(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_sigaction(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 48:
-                cpu->Regs()[0] = guest_sigprocmask(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_sigprocmask(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 54:
-                cpu->Regs()[0] = guest_ioctl(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_ioctl(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 58:
-                cpu->Regs()[0] = guest_readlink(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_readlink(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 73:
-                cpu->Regs()[0] = guest_munmap(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_munmap(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 74:
-                cpu->Regs()[0] = guest_mprotect(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_mprotect(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 75: // posix_madvise
-                cpu->Regs()[0] = 0;
+                threadHandle.interp->ctx.regs[0] = 0;
                 break;
             case 92:
             case SYS_fcntl_nocancel:
-                cpu->Regs()[0] = guest_fcntl(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_fcntl(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 98:
-                cpu->Regs()[0] = guest_connect(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_connect(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 116:
-                cpu->Regs()[0] = guest_gettimeofday(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_gettimeofday(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 121:
             case SYS_writev_nocancel:
-                cpu->Regs()[0] = guest_writev(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_writev(NR, threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 128:
-                cpu->Regs()[0] = guest_rename(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_rename(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 133:
-                cpu->Regs()[0] = guest_sendto(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5]);
+                threadHandle.interp->ctx.regs[0] = guest_sendto(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[4], threadHandle.interp->ctx.regs[5]);
                 break;
             case 153:
             case SYS_pread_nocancel:
-                cpu->Regs()[0] = guest_pread(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3] | ((u64)cpu->Regs()[4] << 32));
+                threadHandle.interp->ctx.regs[0] = guest_pread(NR, threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3] | ((u64)threadHandle.interp->ctx.regs[4] << 32));
                 break;
             case 169:
-                cpu->Regs()[0] = guest_csops(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
+                threadHandle.interp->ctx.regs[0] = guest_csops(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3]);
                 break;
             case 194:
-                cpu->Regs()[0] = guest_getrlimit(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_getrlimit(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 197:
-                cpu->Regs()[0] = guest_mmap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5] | ((u64)cpu->Regs()[6] << 32));
+                threadHandle.interp->ctx.regs[0] = guest_mmap(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[4], threadHandle.interp->ctx.regs[5] | ((u64)threadHandle.interp->ctx.regs[6] << 32));
                 break;
             case 202:
-                cpu->Regs()[0] = guest___sysctl(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5]);
+                threadHandle.interp->ctx.regs[0] = guest___sysctl(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[4], threadHandle.interp->ctx.regs[5]);
                 break;
             case 220:
-                cpu->Regs()[0] = guest_getattrlist(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4]);
+                threadHandle.interp->ctx.regs[0] = guest_getattrlist(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[4]);
                 break;
             case 266:
-                cpu->Regs()[0] = guest_shm_open(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_shm_open(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 274:
-                cpu->Regs()[0] = guest___sysctlbyname(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5]);
+                threadHandle.interp->ctx.regs[0] = guest___sysctlbyname(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[4], threadHandle.interp->ctx.regs[5]);
                 break;
             case 286:
-                cpu->Regs()[0] = guest_pthread_getugid_np(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_pthread_getugid_np(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 294: // __shared_region_check_np
-                cpu->Regs()[0] = return_with_carry_direct(EINVAL, true);
+                threadHandle.interp->ctx.regs[0] = return_with_carry_direct(EINVAL, true);
                 break;
 #if 0
             case 301:
@@ -1521,7 +1589,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 DumpCrashReport();
                 break;
             case 329:
-                cpu->Regs()[0] = guest_pthread_sigmask(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_pthread_sigmask(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
 #if 0
                 case 330:
@@ -1535,74 +1603,75 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     break;
 #endif
             case 336:
-                cpu->Regs()[0] = guest_proc_info(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3] | ((u64)cpu->Regs()[4] << 32), cpu->Regs()[5], cpu->Regs()[6]);
+                threadHandle.interp->ctx.regs[0] = guest_proc_info(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3] | ((u64)threadHandle.interp->ctx.regs[4] << 32), threadHandle.interp->ctx.regs[5], threadHandle.interp->ctx.regs[6]);
                 break;
             case 338:
-                cpu->Regs()[0] = guest_stat64(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_stat64(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 339:
-                cpu->Regs()[0] = guest_fstat(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_fstat(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 340:
-                cpu->Regs()[0] = guest_lstat(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_lstat(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 344:
-                cpu->Regs()[0] = guest_getdirentries64(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
+                threadHandle.interp->ctx.regs[0] = guest_getdirentries64(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3]);
                 break;
             case 345:
-                cpu->Regs()[0] = guest_statfs64(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_statfs64(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 346:
-                cpu->Regs()[0] = guest_fstatfs64(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_fstatfs64(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case 366:
-                cpu->Regs()[0] = guest_bsdthread_register(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5] | ((u64)cpu->Regs()[6] << 32));
+                threadHandle.interp->ctx.regs[0] = guest_bsdthread_register(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[4], threadHandle.interp->ctx.regs[5] | ((u64)threadHandle.interp->ctx.regs[6] << 32));
                 break;
             case 381:
-                cpu->Regs()[0] = guest_sandbox_ms(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                threadHandle.interp->ctx.regs[0] = guest_sandbox_ms(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
                 break;
             case 489: //mremap_encrypted
                 printf("LC32: attempted to load encrypted binaries?\n");
-                cpu->Regs()[0] = 0; //return_with_carry_direct(EPERM, true);
+                threadHandle.interp->ctx.regs[0] = 0; //return_with_carry_direct(EPERM, true);
                 break;
             case 500:
-                cpu->Regs()[0] = guest_getentropy(cpu->Regs()[0], cpu->Regs()[1]);
+                threadHandle.interp->ctx.regs[0] = guest_getentropy(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 break;
             case SYS_abort_with_payload:
-                cpu->Regs()[0] = guest_abort_with_payload(cpu->Regs()[0], cpu->Regs()[1] | ((u64)cpu->Regs()[2] << 32), cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5], cpu->Regs()[6] | ((u64)cpu->Regs()[8] << 32));
+                threadHandle.interp->ctx.regs[0] = guest_abort_with_payload(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1] | ((u64)threadHandle.interp->ctx.regs[2] << 32), threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[4], threadHandle.interp->ctx.regs[5], threadHandle.interp->ctx.regs[6] | ((u64)threadHandle.interp->ctx.regs[8] << 32));
                 DumpCrashReport();
                 break;
             case (int)0x80000000:
-                NR = cpu->Regs()[3];
+                NR = threadHandle.interp->ctx.regs[3];
                 if(handleMachineDependentSyscall(NR)) {
                     break;
                 }
             case 1001: { // LC32Dlsym
-                u64 result = LC32Dlsym(cpu->Regs()[0], cpu->Regs()[1]);
-                cpu->Regs()[0] = (u32)result;
-                cpu->Regs()[1] = (u32)(result >> 32);
+                u64 result = LC32Dlsym(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
+                threadHandle.interp->ctx.regs[0] = (u32)result;
+                threadHandle.interp->ctx.regs[1] = (u32)(result >> 32);
                 break;
             }
             case 1002: { // LC32InvokeHostCRet32
-                if(cpu->IsExecuting()) {
+                if(threadHandle.interp->running) {
                     // Get out of the callback first, since host may call other guest functions
-                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    threadHandle.interp->halted = true;
+                    threadHandle.interp->running = false;
                     return;
                 }
                 typedef u32(*HostCall)(u32, u32, u32);
-                HostCall hostCall = (HostCall)((u64)cpu->Regs()[0] | ((u64)cpu->Regs()[1] << 32));
-                cpu->Regs()[0] = hostCall(cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[ARM_REG_SP]);
+                HostCall hostCall = (HostCall)((u64)threadHandle.interp->ctx.regs[0] | ((u64)threadHandle.interp->ctx.regs[1] << 32));
+                threadHandle.interp->ctx.regs[0] = hostCall(threadHandle.interp->ctx.regs[2], threadHandle.interp->ctx.regs[3], threadHandle.interp->ctx.regs[ARM_REG_SP]);
                 break;
             }
             case 1003: { // LC32GuestToHostCString
-                DynarmicHostString host_pointer(cpu->Regs()[0], cpu->Regs()[1]);
+                DynarmicHostString host_pointer(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1]);
                 u64 result = (u64)host_pointer.hostPtrForGuest();
-                cpu->Regs()[0] = (u32)result;
-                cpu->Regs()[1] = (u32)(result >> 32);
+                threadHandle.interp->ctx.regs[0] = (u32)result;
+                threadHandle.interp->ctx.regs[1] = (u32)(result >> 32);
                 break;
             }
             case 1004: { // LC32GuestToHostCStringFree
-                u64 pointer = cpu->Regs()[0] | ((u64)cpu->Regs()[1] << 32);
+                u64 pointer = threadHandle.interp->ctx.regs[0] | ((u64)threadHandle.interp->ctx.regs[1] << 32);
                 // TODO: maybe move the check to guest
                 if(pointer & DynarmicHostString_NEED_FREE) {
                     free((void *)((u64)pointer & ~DynarmicHostString_NEED_FREE));
@@ -1610,44 +1679,47 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             }
             case 1005: { // LC32GetHostSelector
-                u64 result = LC32GetHostSelector(cpu->Regs()[0]);
-                cpu->Regs()[0] = (u32)result;
-                cpu->Regs()[1] = (u32)(result >> 32);
+                u64 result = LC32GetHostSelector(threadHandle.interp->ctx.regs[0]);
+                threadHandle.interp->ctx.regs[0] = (u32)result;
+                threadHandle.interp->ctx.regs[1] = (u32)(result >> 32);
                 break;
             }
             case 1006: { // LC32InvokeHostSelector
-                if(cpu->IsExecuting()) {
+                if(threadHandle.interp->running) {
                     // Get out of the callback first, since host may call other guest functions
-                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    threadHandle.interp->halted = true;
+                    threadHandle.interp->running = false;
                     return;
                 }
-                u64 host_self = (u64)cpu->Regs()[0] | ((u64)cpu->Regs()[1] << 32);
-                u64 host_cmd = (u64)cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32);
-                u64 result = LC32InvokeHostSelector(host_self, host_cmd, cpu->Regs()[ARM_REG_SP]);
-                cpu->Regs()[0] = (u32)result;
-                cpu->Regs()[1] = (u32)(result >> 32);
+                u64 host_self = (u64)threadHandle.interp->ctx.regs[0] | ((u64)threadHandle.interp->ctx.regs[1] << 32);
+                u64 host_cmd = (u64)threadHandle.interp->ctx.regs[2] | ((u64)threadHandle.interp->ctx.regs[3] << 32);
+                u64 result = LC32InvokeHostSelector(host_self, host_cmd, threadHandle.interp->ctx.regs[ARM_REG_SP]);
+                threadHandle.interp->ctx.regs[0] = (u32)result;
+                threadHandle.interp->ctx.regs[1] = (u32)(result >> 32);
                 break;
             }
             case 1007: { // LC32GetHostObject
-                if(cpu->IsExecuting()) {
+                if(threadHandle.interp->running) {
                     // Get out of the callback first, since host may call other guest functions
-                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    threadHandle.interp->halted = true;
+                    threadHandle.interp->running = false;
                     return;
                 }
-                u64 result = LC32GetHostObject(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
-                cpu->Regs()[0] = (u32)result;
-                cpu->Regs()[1] = (u32)(result >> 32);
+                u64 result = LC32GetHostObject(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], threadHandle.interp->ctx.regs[2]);
+                threadHandle.interp->ctx.regs[0] = (u32)result;
+                threadHandle.interp->ctx.regs[1] = (u32)(result >> 32);
                 break;
             }
             case 1008: { // LC32HostToGuestCopyString
-                u64 host_object = (u64)cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32);
-                cpu->Regs()[0] = LC32HostToGuestCopyClassName(cpu->Regs()[0], cpu->Regs()[1], host_object);
+                u64 host_object = (u64)threadHandle.interp->ctx.regs[2] | ((u64)threadHandle.interp->ctx.regs[3] << 32);
+                threadHandle.interp->ctx.regs[0] = LC32HostToGuestCopyClassName(threadHandle.interp->ctx.regs[0], threadHandle.interp->ctx.regs[1], host_object);
                 break;
             }
             case 1009:
-                assert(cpu->IsExecuting());
+                assert(threadHandle.interp->running);
                 // We're returning from guest call
-                cpu->HaltExecution(LC32HaltReasonRetFromGuest);
+                threadHandle.interp->halted = true;
+                threadHandle.interp->running = false;
                 return;
             default:
                 printf("Unhandled svc number: %d\n", NR);
@@ -1655,7 +1727,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
         }
 #if TRACE_SVC
-        printf("CallSVC returned 0x%08x, carry %d\n", cpu->Regs()[0], cpsr->hasCarry());
+        printf("CallSVC returned 0x%08x, carry %d\n", threadHandle.interp->ctx.regs[0], cpsr->hasCarry());
 #endif
     }
 
@@ -1669,30 +1741,29 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 //backend.reg_write(ArmConst.UC_ARM_REG_R0, sys_dcache_flush(emulator));
                 return true;
             case 2:
-                printf("TSB set to 0x%08x\n", cpu->Regs()[0]);
-                cp15.get()->uro = cpu->Regs()[0];
-                cpu->Regs()[0] = 0;
+                printf("TSB set to 0x%08x\n", threadHandle.interp->ctx.regs[0]);
+                cp15->uro = threadHandle.interp->ctx.regs[0];
+                threadHandle.interp->ctx.regs[0] = 0;
                 return true;
             case 3:
-                cpu->Regs()[0] = cp15.get()->uro;
+                threadHandle.interp->ctx.regs[0] = cp15->uro;
                 return true;
         }
         return false;
     }
 
-    void AddTicks(u64 ticks) override {
+    void AddTicks(u64 ticks) {
     }
 
-    u64 GetTicksRemaining() override {
+    u64 GetTicksRemaining() {
         return 0x10000000000ULL;
     }
 
     khash_t(memory) *memory = NULL;
     size_t num_page_table_entries;
     void **page_table = NULL;
-    Dynarmic::A32::Jit *cpu;
     DynarmicCpsr *cpsr;
-    std::shared_ptr<DynarmicCP15> cp15;
+    DynarmicCP15 *cp15;
 };
 
 #ifdef __cplusplus
@@ -1717,50 +1788,27 @@ bool Dynarmic_nativeInitialize() {
     abort();
     return 0;
   }
-  sharedHandle.monitor = new Dynarmic::ExclusiveMonitor(1);
-  {
-    DynarmicCallbacks32 *callbacks = new DynarmicCallbacks32(sharedHandle.memory);
-
-    Dynarmic::A32::UserConfig config;
-    config.callbacks = callbacks;
-    config.coprocessors[15] = callbacks->cp15;
-    config.processor_id = 0;
-    config.global_monitor = sharedHandle.monitor;
-    config.always_little_endian = false;
-    config.wall_clock_cntpct = true;
-//    config.page_table_pointer_mask_bits = DYN_PAGE_BITS;
-
-//    config.unsafe_optimizations = true;
-//    config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA;
-//    config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_ReducedErrorFP;
-
-    sharedHandle.num_page_table_entries = Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES;
-    size_t size = sharedHandle.num_page_table_entries * sizeof(void*);
-    sharedHandle.page_table = (void **)mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if(sharedHandle.page_table == MAP_FAILED) {
-      fprintf(stderr, "nativeInitialize mmap failed[%s->%s:%d] size=0x%zx, errno=%d, msg=%s\n", __FILE__, __func__, __LINE__, size, errno, strerror(errno));
-      sharedHandle.page_table = NULL;
-    } else {
-      callbacks->num_page_table_entries = sharedHandle.num_page_table_entries;
-      callbacks->page_table = sharedHandle.page_table;
-
-      // Unpredictable instructions
-      config.define_unpredictable_behaviour = true;
-
-      // Memory
-      config.page_table = reinterpret_cast<std::array<std::uint8_t*, Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>*>(sharedHandle.page_table);
-      config.absolute_offset_page_table = false;
-      config.detect_misaligned_access_via_page_table = 16 | 32 | 64 | 128;
-      config.only_detect_misalignment_via_page_table_on_page_boundary = true;
-    }
-
-    sharedHandle.cb = callbacks;
-    threadHandle.jit = new Dynarmic::A32::Jit(config);
-    threadHandle.cpsr = new DynarmicCpsr(threadHandle.jit);
-    sharedHandle.fs = new LC32Filesystem();
-    callbacks->cpu = threadHandle.jit;
-    callbacks->cpsr = threadHandle.cpsr;
+  
+  DynarmicCallbacks32 *callbacks = new DynarmicCallbacks32(sharedHandle.memory);
+  
+  sharedHandle.num_page_table_entries = (1ULL << (PAGE_TABLE_ADDRESS_SPACE_BITS - DYN_PAGE_BITS));
+  size_t size = sharedHandle.num_page_table_entries * sizeof(void*);
+  sharedHandle.page_table = (void **)mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  if(sharedHandle.page_table == MAP_FAILED) {
+    fprintf(stderr, "nativeInitialize mmap failed size=0x%zx, errno=%d\n", size, errno);
+    sharedHandle.page_table = NULL;
+  } else {
+    callbacks->num_page_table_entries = sharedHandle.num_page_table_entries;
+    callbacks->page_table = sharedHandle.page_table;
   }
+
+  sharedHandle.cb = callbacks;
+  threadHandle.interp = new ArmInterpreter();
+  LiveExecArmCallbacks *armCallbacks = new LiveExecArmCallbacks();
+  threadHandle.interp->set_callbacks(armCallbacks);
+  threadHandle.cpsr = new DynarmicCpsr(threadHandle.interp);
+  sharedHandle.fs = new LC32Filesystem();
+  callbacks->cpsr = threadHandle.cpsr;
   return true;
 }
 
@@ -1769,31 +1817,19 @@ void Dynarmic_nativeDestroy() {
   for (khiter_t k = kh_begin(memory); k < kh_end(memory); k++) {
     if(kh_exist(memory, k)) {
       t_memory_page page = kh_value(memory, k);
-      int ret = munmap(page->addr, DYN_PAGE_SIZE);
-      if(ret != 0) {
-        fprintf(stderr, "munmap failed[%s->%s:%d]: addr=%p, ret=%d\n", __FILE__, __func__, __LINE__, page->addr, ret);
-      }
+      munmap(page->addr, DYN_PAGE_SIZE);
       free(page);
     }
   }
   kh_destroy(memory, memory);
-  Dynarmic::A32::Jit *jit = threadHandle.jit;
-  if(jit) {
-    jit->ClearCache();
-    jit->Reset();
-    delete jit;
-  }
+  delete threadHandle.interp;
   DynarmicCallbacks32 *cb = sharedHandle.cb;
   if(cb) {
     cb->destroy();
   }
   if(sharedHandle.page_table) {
-    int ret = munmap(sharedHandle.page_table, sharedHandle.num_page_table_entries * sizeof(void*));
-    if(ret != 0) {
-      fprintf(stderr, "munmap failed[%s->%s:%d]: page_table=%p, ret=%d\n", __FILE__, __func__, __LINE__, sharedHandle.page_table, ret);
-    }
+    munmap(sharedHandle.page_table, sharedHandle.num_page_table_entries * sizeof(void*));
   }
-  delete sharedHandle.monitor;
 }
 
 // FIXME: unmapping 1/4 of 16k page will unmap other 3/4 pages
@@ -2036,15 +2072,11 @@ int Dynarmic_mem_1read(u64 address, u64 size, char* dest) {
  * Signature: (JIJ)I
  */
 int Dynarmic_reg_1write(int index, u32 value) {
-  {
-    Dynarmic::A32::Jit *jit = threadHandle.jit;
-    if(jit) {
-      jit->Regs()[index] = value;
-    } else {
-      return 1;
-    }
-  }
-  return 0;
+    ArmInterpreter *interp = threadHandle.interp;
+    if(interp) {
+      interp->ctx.regs[index] = value;
+    } else { return 1; }
+    return 0;
 }
 
 /*
@@ -2053,15 +2085,9 @@ int Dynarmic_reg_1write(int index, u32 value) {
  * Signature: (JI)J
  */
 u32 Dynarmic_reg_1read(int index) {
-  {
-    Dynarmic::A32::Jit *jit = threadHandle.jit;
-    if(jit) {
-      return jit->Regs()[index];
-    } else {
-      abort();
-      return -1;
-    }
-  }
+    ArmInterpreter *interp = threadHandle.interp;
+    if(interp) { return interp->ctx.regs[index]; }
+    else { abort(); return -1; }
 }
 
 /*
@@ -2070,15 +2096,9 @@ u32 Dynarmic_reg_1read(int index) {
  * Signature: (J)I
  */
 int Dynarmic_reg_1read_1cpsr() {
-  {
-    Dynarmic::A32::Jit *jit = threadHandle.jit;
-    if(jit) {
-      return jit->Cpsr();
-    } else {
-      abort();
-      return -1;
-    }
-  }
+    ArmInterpreter *interp = threadHandle.interp;
+    if(interp) { return interp->ctx.cpsr; }
+    else { abort(); return -1; }
 }
 
 /*
@@ -2087,16 +2107,9 @@ int Dynarmic_reg_1read_1cpsr() {
  * Signature: (JI)I
  */
 int Dynarmic_reg_1write_1cpsr(int value) {
-  {
-    Dynarmic::A32::Jit *jit = threadHandle.jit;
-    if(jit) {
-      jit->SetCpsr(value);
-      return 0;
-    } else {
-      abort();
-      return -1;
-    }
-  }
+    ArmInterpreter *interp = threadHandle.interp;
+    if(interp) { interp->ctx.cpsr = value; return 0; }
+    else { abort(); return -1; }
 }
 
 /*
@@ -2105,16 +2118,11 @@ int Dynarmic_reg_1write_1cpsr(int value) {
  * Signature: (JI)I
  */
 int Dynarmic_reg_1write_1c13_1c0_13(int value) {
-  {
     DynarmicCallbacks32 *cb = sharedHandle.cb;
     if(cb) {
-      cb->cp15.get()->uro = value;
+      cb->cp15->uro = value;
       return 0;
-    } else {
-      abort();
-      return -1;
-    }
-  }
+    } else { abort(); return -1; }
 }
 
 /*
@@ -2123,24 +2131,28 @@ int Dynarmic_reg_1write_1c13_1c0_13(int value) {
  * Signature: (JJ)I
  */
 int Dynarmic_emu_1start(u32 pc) {
-  {
-    Dynarmic::A32::Jit *jit = threadHandle.jit;
-    if(jit) {
-      Dynarmic::A32::Jit *cpu = jit;
+    ArmInterpreter *interp = threadHandle.interp;
+    if(interp) {
+      interp->running = true;
+      interp->halted = false;
       if(pc & 1) {
-        cpu->SetCpsr(0x00000030); // Thumb user mode
+        interp->ctx.cpsr = 0x00000030; // Thumb user mode
       } else {
-        cpu->SetCpsr(0x000001d0); // Arm user mode
+        interp->ctx.cpsr = 0x000001d0; // Arm user mode
       }
-      cpu->Regs()[15] = (u32) (pc & ~1);
-      while(cpu->Run() == LC32HaltReasonSVC) {
-        sharedHandle.ucb->CallSVC(0x80);
-      }
-    } else {
-      return 1;
-    }
-  }
-  return 0;
+      interp->ctx.regs[15] = (u32)(pc & ~1);
+      do {
+        interp->halted = false;
+        interp->running = true;
+        interp->execute((u32)(interp->ctx.regs[15]));
+        // When svc_hook halts, we're back from the interpreter
+        // CallSVC dispatches the syscall; it may halt again for 1002/1006/1007/1009
+        if(!interp->halted) {
+            sharedHandle.cb->CallSVC(0x80);
+        }
+      } while(!interp->halted && interp->running);
+    } else { return 1; }
+    return 0;
 }
 
 /*
@@ -2149,16 +2161,11 @@ int Dynarmic_emu_1start(u32 pc) {
  * Signature: (J)I
  */
 int Dynarmic_emu_1stop() {
-  {
-    Dynarmic::A32::Jit *jit = threadHandle.jit;
-    if(jit) {
-      Dynarmic::A32::Jit *cpu = jit;
-      cpu->HaltExecution();
-    } else {
-      return 1;
-    }
-  }
-  return 0;
+    ArmInterpreter *interp = threadHandle.interp;
+    if(interp) {
+      interp->halted = true;
+    } else { return 1; }
+    return 0;
 }
 
 /*
@@ -2179,16 +2186,13 @@ void* Dynarmic_context_1alloc() {
  * Signature: (JJ)V
  */
 void Dynarmic_context_1restore(t_context32 ctx) {
-  {
-    Dynarmic::A32::Jit *jit = threadHandle.jit;
-    jit->Regs() = ctx->regs;
-    jit->ExtRegs() = ctx->extRegs;
-    jit->SetCpsr(ctx->cpsr);
-    jit->SetFpscr(ctx->fpscr);
-
+    ArmInterpreter *interp = threadHandle.interp;
+    memcpy(interp->ctx.regs, ctx->regs.data(), sizeof(ctx->regs));
+    memcpy(interp->ctx.extRegs, ctx->extRegs.data(), sizeof(ctx->extRegs));
+    interp->ctx.cpsr = ctx->cpsr;
+    interp->ctx.fpscr = ctx->fpscr;
     DynarmicCallbacks32 *cb = sharedHandle.cb;
-    cb->cp15.get()->uro = ctx->uro;
-  }
+    cb->cp15->uro = ctx->uro;
 }
 
 /*
@@ -2197,16 +2201,13 @@ void Dynarmic_context_1restore(t_context32 ctx) {
  * Signature: (JJ)V
  */
 void Dynarmic_context_1save(t_context32 ctx) {
-  {
-    Dynarmic::A32::Jit *jit = threadHandle.jit;
-    ctx->regs = jit->Regs();
-    ctx->extRegs = jit->ExtRegs();
-    ctx->cpsr = jit->Cpsr();
-    ctx->fpscr = jit->Fpscr();
-
+    ArmInterpreter *interp = threadHandle.interp;
+    memcpy(ctx->regs.data(), interp->ctx.regs, sizeof(ctx->regs));
+    memcpy(ctx->extRegs.data(), interp->ctx.extRegs, sizeof(ctx->extRegs));
+    ctx->cpsr = interp->ctx.cpsr;
+    ctx->fpscr = interp->ctx.fpscr;
     DynarmicCallbacks32 *cb = sharedHandle.cb;
-    ctx->uro = cb->cp15.get()->uro;
-  }
+    ctx->uro = cb->cp15->uro;
 }
 
 /*
