@@ -1,6 +1,6 @@
 #import <UIKit/UIKit.h>
 
-extern "C" int LiveExec32_run(const char *execPath);
+extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const char *dyldPath);
 
 @interface LC32ViewController : UIViewController
 @end
@@ -161,9 +161,16 @@ extern "C" int LiveExec32_run(const char *execPath);
     _statusLabel.textColor = [UIColor systemOrangeColor];
 
     const char *cPath = [path UTF8String];
+    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+    NSString *ramdiskPath = [bundlePath stringByAppendingPathComponent:@"ramdisk32"];
+    const char *rootPath = [ramdiskPath UTF8String];
+    NSString *dyldPathStr = [ramdiskPath stringByAppendingPathComponent:@"usr/lib/dyld"];
+    const char *dyldPath = [dyldPathStr UTF8String];
     dispatch_async(_emulatorQueue, ^{
         [self log:@"Loading: %s", cPath];
-        int result = LiveExec32_run(cPath);
+        [self log:@"Root: %s", rootPath];
+        [self log:@"Dyld: %s", dyldPath];
+        int result = LiveExec32_run(cPath, rootPath, dyldPath);
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_runButton.enabled = YES;
             [self->_runButton setTitle:@"Run" forState:UIControlStateNormal];

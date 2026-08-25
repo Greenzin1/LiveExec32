@@ -27,9 +27,8 @@
 
 #define SEG_DATA_CONST  "__DATA_CONST"
 
-// /var/mobile/Documents/TrollExperiments/CProjects/dynarmic
-#define DEFAULT_ROOT_PATH "/private/var/mobile/Documents/TrollExperiments/CProjects/dynarmic/iOS10RAMDisk"
-#define DEFAULT_DYLD_PATH DEFAULT_ROOT_PATH "/usr/lib/dyld"
+#define DEFAULT_ROOT_PATH ""
+#define DEFAULT_DYLD_PATH ""
 
 extern "C" {
 
@@ -149,19 +148,14 @@ u32 prependString(u32& address, const char* fmt, ...) {
   return address;
 }
 
-int LiveExec32_run(const char *execPath) {
+int LiveExec32_run(const char *execPath, const char *rootPath, const char *dyldPath) {
 
   Dynarmic_nativeInitialize();
   u32 execAddr = Dynarmic_map_file(false, 0x11000000, execPath);
 
-  setenv("DYLD_PATH", DEFAULT_DYLD_PATH, 0);
-  const char *dyldPath = getenv("DYLD_PATH");
-  printf("Loading dyld at DYLD_PATH %s\n", dyldPath);
+  printf("Loading dyld at %s\n", dyldPath);
   Dynarmic_map_file(true, 0x10000000, dyldPath);
   printf("entry point: 0x%x\n", threadHandle.interp->ctx.regs[15]);
-
-  setenv("ROOT_PATH", DEFAULT_ROOT_PATH, 0);
-  const char *rootPath = getenv("ROOT_PATH");
   chdir(rootPath);
   if (getuid() == 0) {
     chroot(rootPath);
