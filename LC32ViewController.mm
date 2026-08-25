@@ -3,7 +3,7 @@
 extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const char *dyldPath);
 extern "C" int extract_zip(const char *zip_path, const char *dest_dir);
 
-@interface LC32ViewController : UIViewController
+@interface LC32ViewController : UIViewController <UIDocumentPickerDelegate>
 @end
 
 @implementation LC32ViewController {
@@ -126,8 +126,8 @@ extern "C" int extract_zip(const char *zip_path, const char *dest_dir);
 
 - (void)pickFile {
     UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
-        initWithDocumentTypes:@[@"public.data", @"public.content"]
-        inMode:UIDocumentPickerModeOpen];
+        initWithDocumentTypes:@[@"public.item"]
+        inMode:UIDocumentPickerModeImport];
     picker.delegate = (id)self;
     picker.allowsMultipleSelection = NO;
     [self presentViewController:picker animated:YES completion:nil];
@@ -135,24 +135,37 @@ extern "C" int extract_zip(const char *zip_path, const char *dest_dir);
 
 - (void)pickIPA {
     UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
-        initWithDocumentTypes:@[@"com.apple.pkzip-archive", @"com.apple.zip-archive", @"public.data"]
-        inMode:UIDocumentPickerModeOpen];
+        initWithDocumentTypes:@[@"com.apple.pkzip-archive", @"com.apple.zip-archive", @"public.item"]
+        inMode:UIDocumentPickerModeImport];
     picker.delegate = (id)self;
     picker.allowsMultipleSelection = NO;
     [self presentViewController:picker animated:YES completion:nil];
 }
 
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    if (urls.count > 0) {
-        NSURL *url = urls.firstObject;
-        NSString *path = url.path;
-        _pathField.text = path;
-        [self log:@"Selected: %@", path];
-
-        if ([path.pathExtension.lowercaseString isEqualToString:@"ipa"]) {
-            [self extractIPA:path];
-        }
+- (void)handlePickedURL:(NSURL *)url {
+    NSString *tmpDir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"liveexec_pick"];
+    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+    [[NSFileManager defaultManager] createDirectoryAtPath:tmpDir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *destPath = [tmpDir stringByAppendingPathComponent:url.lastPathComponent];
+    NSError *err = nil;
+    [[NSFileManager defaultManager] copyItemAtURL:url toURL:[NSURL fileURLWithPath:destPath] error:&err];
+    if (err) {
+        destPath = url.path;
     }
+    _pathField.text = destPath;
+    [self log:@"Selected: %@", destPath];
+
+    if ([destPath.pathExtension.lowercaseString isEqualToString:@"ipa"]) {
+        [self extractIPA:destPath];
+    }
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentAtURL:(NSURL *)url {
+    if (url) [self handlePickedURL:url];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.count > 0) [self handlePickedURL:urls.firstObject];
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {}
