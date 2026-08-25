@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 
 extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const char *dyldPath);
+extern "C" int extract_zip(const char *zip_path, const char *dest_dir);
 
 @interface LC32ViewController : UIViewController
 @end
@@ -10,6 +11,7 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
     UITextField *_pathField;
     UIButton *_runButton;
     UIButton *_pickButton;
+    UIButton *_pickIPAButton;
     UILabel *_statusLabel;
     dispatch_queue_t _emulatorQueue;
 }
@@ -20,7 +22,6 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     _emulatorQueue = dispatch_queue_create("com.liveexec.emulator", DISPATCH_QUEUE_SERIAL);
 
-    // Title
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = @"LiveExec32";
     titleLabel.font = [UIFont boldSystemFontOfSize:28];
@@ -28,7 +29,6 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:titleLabel];
 
-    // Subtitle
     UILabel *subtitleLabel = [[UILabel alloc] init];
     subtitleLabel.text = @"32-bit ARM Emulator (No JIT)";
     subtitleLabel.font = [UIFont systemFontOfSize:14];
@@ -37,7 +37,6 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
     subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:subtitleLabel];
 
-    // Status
     _statusLabel = [[UILabel alloc] init];
     _statusLabel.text = @"Ready";
     _statusLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
@@ -46,9 +45,8 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
     _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:_statusLabel];
 
-    // Path field
     _pathField = [[UITextField alloc] init];
-    _pathField.placeholder = @"/var/mobile/Documents/app32";
+    _pathField.placeholder = @"/var/mobile/.../binary32";
     _pathField.borderStyle = UITextBorderStyleRoundedRect;
     _pathField.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
     _pathField.autocapitalizationType = UITextAutocapitalizationTypeNone;
@@ -56,14 +54,19 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
     _pathField.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:_pathField];
 
-    // Pick button
     _pickButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [_pickButton setTitle:@"Browse Files" forState:UIControlStateNormal];
+    [_pickButton setTitle:@"Browse" forState:UIControlStateNormal];
     [_pickButton addTarget:self action:@selector(pickFile) forControlEvents:UIControlEventTouchUpInside];
     _pickButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:_pickButton];
 
-    // Run button
+    _pickIPAButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_pickIPAButton setTitle:@"Open .ipa" forState:UIControlStateNormal];
+    [_pickIPAButton setTitleColor:[UIColor systemOrangeColor] forState:UIControlStateNormal];
+    [_pickIPAButton addTarget:self action:@selector(pickIPA) forControlEvents:UIControlEventTouchUpInside];
+    _pickIPAButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_pickIPAButton];
+
     _runButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [_runButton setTitle:@"Run" forState:UIControlStateNormal];
     _runButton.titleLabel.font = [UIFont boldSystemFontOfSize:17];
@@ -74,7 +77,6 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
     _runButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:_runButton];
 
-    // Console
     _console = [[UITextView alloc] init];
     _console.editable = NO;
     _console.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
@@ -82,10 +84,9 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
     _console.textColor = [UIColor greenColor];
     _console.layer.cornerRadius = 8;
     _console.translatesAutoresizingMaskIntoConstraints = NO;
-    _console.text = @"LiveExec32 Console\n==================\nSelect a 32-bit ARM binary to run.\n\n";
+    _console.text = @"LiveExec32 Console\n==================\nSelect a 32-bit ARM binary.\n";
     [self.view addSubview:_console];
 
-    // Layout
     [NSLayoutConstraint activateConstraints:@[
         [titleLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:16],
         [titleLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
@@ -106,9 +107,12 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
 
         [_pickButton.centerYAnchor constraintEqualToAnchor:_pathField.centerYAnchor],
         [_pickButton.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-        [_pickButton.widthAnchor constraintEqualToConstant:100],
+        [_pickButton.widthAnchor constraintEqualToConstant:70],
 
-        [_runButton.topAnchor constraintEqualToAnchor:_pathField.bottomAnchor constant:12],
+        [_pickIPAButton.topAnchor constraintEqualToAnchor:_pathField.bottomAnchor constant:8],
+        [_pickIPAButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+
+        [_runButton.topAnchor constraintEqualToAnchor:_pickIPAButton.bottomAnchor constant:12],
         [_runButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [_runButton.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
         [_runButton.heightAnchor constraintEqualToConstant:44],
@@ -122,7 +126,16 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
 
 - (void)pickFile {
     UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
-        initWithDocumentTypes:@[@"public.data"]
+        initWithDocumentTypes:@[@"public.data", @"public.content"]
+        inMode:UIDocumentPickerModeOpen];
+    picker.delegate = (id)self;
+    picker.allowsMultipleSelection = NO;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)pickIPA {
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
+        initWithDocumentTypes:@[@"com.apple.pkzip-archive", @"com.apple.zip-archive", @"public.data"]
         inMode:UIDocumentPickerModeOpen];
     picker.delegate = (id)self;
     picker.allowsMultipleSelection = NO;
@@ -131,11 +144,107 @@ extern "C" int LiveExec32_run(const char *execPath, const char *rootPath, const 
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count > 0) {
-        _pathField.text = urls.firstObject.path;
+        NSURL *url = urls.firstObject;
+        NSString *path = url.path;
+        _pathField.text = path;
+        [self log:@"Selected: %@", path];
+
+        if ([path.pathExtension.lowercaseString isEqualToString:@"ipa"]) {
+            [self extractIPA:path];
+        }
     }
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {}
+
+- (void)extractIPA:(NSString *)ipaPath {
+    [self log:@"Extracting IPA: %@", ipaPath.lastPathComponent];
+
+    dispatch_async(_emulatorQueue, ^{
+        NSString *tmpDir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"liveexec_ipa"];
+        [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+        [[NSFileManager defaultManager] createDirectoryAtPath:tmpDir withIntermediateDirectories:YES attributes:nil error:nil];
+
+        int status = extract_zip([ipaPath UTF8String], [tmpDir UTF8String]);
+
+        if (status != 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self log:@"Error: unzip failed with code %d", status];
+            });
+            return;
+        }
+
+        // Find .app directory
+        NSString *payloadDir = [tmpDir stringByAppendingPathComponent:@"Payload"];
+        NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:payloadDir error:nil];
+        NSString *appPath = nil;
+        for (NSString *item in contents) {
+            if ([item.pathExtension isEqualToString:@"app"]) {
+                appPath = [payloadDir stringByAppendingPathComponent:item];
+                break;
+            }
+        }
+
+        if (!appPath) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self log:@"Error: No .app found in IPA"];
+            });
+            return;
+        }
+
+        // Find the main binary from Info.plist
+        NSString *infoPlistPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
+        NSString *execName = info[@"CFBundleExecutable"];
+        if (!execName) execName = info[@"CFBundleName"];
+
+        if (execName) {
+            NSString *execPath = [appPath stringByAppendingPathComponent:execName];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:execPath]) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self->_pathField.text = execPath;
+                    [self log:@"Found binary: %@", execPath];
+                    [self log:@"App: %@", info[@"CFBundleName"] ?: execName];
+                });
+                return;
+            }
+        }
+
+        // Fallback: find first Mach-O
+        NSArray *appContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:appPath error:nil];
+        for (NSString *item in appContents) {
+            if (![item.pathExtension isEqualToString:@"dylib"] &&
+                ![item.pathExtension isEqualToString:@"plist"] &&
+                ![item.pathExtension isEqualToString:@"nib"] &&
+                ![item.pathExtension isEqualToString:@"storyboardc"]) {
+                NSString *itemPath = [appPath stringByAppendingPathComponent:item];
+                NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:nil];
+                if (attrs[NSFileType] == NSFileTypeRegular) {
+                    unsigned char header[4] = {0};
+                    FILE *f = fopen([itemPath UTF8String], "r");
+                    if (f) {
+                        fread(header, 1, 4, f);
+                        fclose(f);
+                        // Mach-O magic: FEEDFACE or BEBAFECA (FAT)
+                        uint32_t magic = *(uint32_t *)header;
+                        if (magic == 0xFEEDFACE || magic == 0xBEBAFECA || magic == 0xCAFEBABE) {
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                self->_pathField.text = itemPath;
+                                [self log:@"Found Mach-O: %@", itemPath];
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self log:@"Error: No executable found in %@", appPath];
+            [self log:@"Contents: %@", [appContents componentsJoinedByString:@", "]];
+        });
+    });
+}
 
 - (void)log:(NSString *)fmt, ... {
     va_list args;
